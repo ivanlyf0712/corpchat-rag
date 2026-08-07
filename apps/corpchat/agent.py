@@ -33,6 +33,7 @@ import re
 import time
 import json
 import logging
+import uuid
 from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger("corpchat-agent")
@@ -49,11 +50,19 @@ from apps.corpchat.search import (
     QueryExpander,
     Reranker,
     AgenticDecider,
+    LiteLLMClient,
     load_index,
     DEFAULT_INDEX_PATH,
     LITELLM_API_KEY,
     LITELLM_BASE_URL,
     LITELLM_MODEL,
+)
+
+# ── Shared LiteLLM client ──────────────────────────────────────────────
+_llm_client = LiteLLMClient(
+    api_base=LITELLM_BASE_URL,
+    api_key=LITELLM_API_KEY,
+    model=LITELLM_MODEL,
 )
 
 # ── Intent categories ────────────────────────────────────────────────────
@@ -76,7 +85,8 @@ SYSTEM_INFO_KEYWORDS = [
     "能做什麼", "what can you do", "can you help", "功能", "能力",
     "作用", "什麼功能", "多少功能", "help", "幫助", "使用說明",
     "搜索範圍", "scope", "what can you search", "can you search",
-    "你能搜尋", "搜什麼", "資料範圍",
+    "你能搜尋", "搜什麼", "資料範圍", "what can you access",
+    "can you access", "access", "知道些什麼", "知道什么", "了解什麼", "了解什么",
 ]
 
 CLARIFY_KEYWORDS = [
@@ -136,16 +146,7 @@ class IntentClassifier:
             self._llm_available = False
             return False
 
-        try:
-            import requests
-            resp = requests.get(
-                LITELLM_BASE_URL.rstrip("/") + "/v1/models",
-                headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
-                timeout=3,
-            )
-            self._llm_available = resp.status_code == 200
-        except Exception:
-            self._llm_available = False
+        self._llm_available = _llm_client.is_available(timeout=3)
 
         self._llm_check_done = True
         return self._llm_available
@@ -158,11 +159,13 @@ class IntentClassifier:
         """
         q_lower = query.lower().strip()
 
-        # System info: asking "what can you do" type questions
-        # Check BEFORE greeting because "what can you do" contains "yo" (in "you")
+        # System info: asking "what can you do / access / know" type questions
+        # Check BEFORE greeting because these often contain greeting-like substrings
         for kw in SYSTEM_INFO_KEYWORDS:
             if kw in q_lower:
                 return INTENT_SYSTEM_INFO
+        if "do you know" in q_lower or "can you access" in q_lower or "what can you" in q_lower:
+            return INTENT_SYSTEM_INFO
 
         # Greeting: typically short, single word
         if len(q_lower) <= 15:
@@ -193,24 +196,16 @@ class IntentClassifier:
             return None
 
         try:
-            import requests
-            resp = requests.post(
-                LITELLM_BASE_URL.rstrip("/") + "/v1/chat/completions",
-                json={
-                    "model": LITELLM_MODEL,
-                    "messages": [
-                        {"role": "system", "content": self._LLM_PROMPT},
-                        {"role": "user", "content": query},
-                    ],
-                    "temperature": 0.0,
-                    "max_tokens": 10,
-                },
-                headers={"Authorization": f"Bearer {LITELLM_API_KEY}",
-                         "Content-Type": "application/json"},
+            result = _llm_client.chat(
+                [
+                    {"role": "system", "content": self._LLM_PROMPT},
+                    {"role": "user", "content": query},
+                ],
+                temperature=0.0,
+                max_tokens=10,
                 timeout=LLM_INTENT_TIMEOUT,
             )
-            resp.raise_for_status()
-            result = resp.json()["choices"][0]["message"]["content"].strip().lower()
+            result = result.strip().lower()
             # Normalize: map synonyms
             for intent in [INTENT_GREETING, INTENT_SYSTEM_INFO, INTENT_SEARCH,
                            INTENT_CLARIFY, INTENT_FALLBACK]:
@@ -259,20 +254,22 @@ class Agent:
     Provides:
         - Intent classification (rule + LLM fallback)
         - Intent routing (static replies, search, clarification)
-        - Multi-turn context memory (last N turns)
+        - Multi-turn context memory (last N turns, DB-backed with in-memory fallback)
         - Graceful degradation when LLM is unavailable
-        - Static responses for greeting and system_info (no LLM dependency)
+        - Dynamic LLM-generated greetings
+        - Static system info response (always available without LLM)
 
     The agent does NOT modify search.py — it wraps Searcher.search().
     """
 
-    # Static responses (no LLM dependency — always available)
+    # Static fallback greeting when LLM is unavailable
     _GREETING_RESPONSE = (
-        "Hello! 👋 I'm **CorpChat Intelligence** — your corporate chat analytics assistant. "
-        "I can search across corporate WeCom conversations to find the information you need. "
-        "Try asking about logistics quotes, investment opportunities, scam messages, or any topic in the conversations."
+        "Hello! I'm **CorpChat Intelligence** — your corporate chat search assistant. "
+        "I can search through conversations for logistics, investments, scams, and more. "
+        "How can I help you today?"
     )
 
+    # Static response for system info (always available without LLM)
     _SYSTEM_INFO_RESPONSE = (
         "I'm **CorpChat Intelligence** — an AI-powered search assistant for corporate chat messages.\n\n"
         "**Capabilities:**\n"
@@ -281,7 +278,7 @@ class Agent:
         "- Graph-enhanced retrieval (traverses conversation relationships)\n"
         "- Cross-encoder reranking for result relevance\n\n"
         "**Data scope:**\n"
-        "- 35 conversation threads across 30 contacts\n"
+        "- Indexed corporate WeCom conversations\n"
         "- Topics: business inquiries, quotations, investments, logistics, tech support,\n"
         "  invoices, contracts, quality issues, scam/phishing detection\n"
         "- Bilingual (Chinese + English) messages\n\n"
@@ -298,6 +295,7 @@ class Agent:
         searcher: Optional[Searcher] = None,
         classifier: Optional[IntentClassifier] = None,
         max_history: int = 10,
+        session_id: Optional[str] = None,
     ):
         """
         Args:
@@ -305,15 +303,48 @@ class Agent:
                         set_searcher() before processing search queries.
             classifier: Intent classifier. If None, creates a default one.
             max_history: Maximum number of turns to keep in context memory.
+            session_id: Optional session ID for DB-backed memory. If None, a new
+                        UUID is generated. Pass an explicit ID to resume a session.
         """
         self.searcher = searcher
         self.classifier = classifier or IntentClassifier()
         self.max_history = max_history
+        self.session_id = session_id or str(uuid.uuid4())
         self.chat_history: List[Dict[str, Any]] = []
+        self._turn_counter = 0
+        self._load_memory_from_db()
 
     def set_searcher(self, searcher: Searcher):
         """Set or replace the Searcher instance (lazy loading support)."""
         self.searcher = searcher
+
+    def _load_memory_from_db(self):
+        """Load recent turns from DB if available; fall back to empty."""
+        try:
+            from core.db import load_agent_memory
+            turns = load_agent_memory(self.session_id, max_turns=self.max_history)
+            if turns:
+                self.chat_history = turns[-self.max_history:]
+                self._turn_counter = len(turns)
+        except Exception:
+            # DB unavailable — use in-memory only
+            pass
+
+    def _persist_turn(self, user_msg: str, bot_msg: str, intent: str):
+        """Append the current turn to DB memory if possible."""
+        try:
+            from core.db import save_agent_memory
+            self._turn_counter += 1
+            save_agent_memory(
+                session_id=self.session_id,
+                turn_number=self._turn_counter,
+                user_message=user_msg,
+                bot_message=bot_msg,
+                intent=intent,
+            )
+        except Exception:
+            # DB unavailable — silently keep in-memory only
+            pass
 
     def _add_to_history(self, user_msg: str, bot_msg: str):
         """Add a turn to the multi-turn context memory."""
@@ -380,16 +411,21 @@ class Agent:
 
         # Step 2: Route based on intent
         if intent == INTENT_GREETING:
-            self._add_to_history(query, self._GREETING_RESPONSE)
-            return intent, self._GREETING_RESPONSE, []
+            # Use LLM to generate a context-aware greeting
+            greeting = self._generate_greeting(user_query=query)
+            self._add_to_history(query, greeting)
+            self._persist_turn(query, greeting, intent)
+            return intent, greeting, []
 
         elif intent == INTENT_SYSTEM_INFO:
             self._add_to_history(query, self._SYSTEM_INFO_RESPONSE)
+            self._persist_turn(query, self._SYSTEM_INFO_RESPONSE, intent)
             return intent, self._SYSTEM_INFO_RESPONSE, []
 
         elif intent == INTENT_CLARIFY:
             response = "I'd be happy to clarify! Could you rephrase your question or provide more specific details about what you're looking for?"
             self._add_to_history(query, response)
+            self._persist_turn(query, response, intent)
             return intent, response, []
 
         elif intent == INTENT_FALLBACK:
@@ -440,6 +476,7 @@ class Agent:
             )
 
             self._add_to_history(query, answer)
+            self._persist_turn(query, answer, intent)
             return intent, answer, results
 
         except Exception as e:
@@ -455,38 +492,59 @@ class Agent:
                 if results:
                     answer = self._format_results_as_answer(query, results)
                     self._add_to_history(query, answer)
+                    self._persist_turn(query, answer, intent)
                     return INTENT_SEARCH, answer, results
             except Exception:
                 pass
 
             self._add_to_history(query, response)
+            self._persist_turn(query, response, intent)
             return intent, response, []
+
+    def _generate_greeting(self, user_query: str = "") -> str:
+        """Generate a friendly, natural greeting via LLM, with fast fallback."""
+        # Respect classifier's LLM availability to keep greeting fast when LLM is down
+        if not self.classifier._check_llm():
+            return self._GREETING_RESPONSE
+        try:
+            result = _llm_client.chat(
+                [
+                    {"role": "system", "content": (
+                        "You are a friendly assistant. Reply to the user's greeting naturally. "
+                        "Keep it short, warm, and context-aware. "
+                        "Do NOT mention you are an AI or list capabilities."
+                    )},
+                    {"role": "user", "content": user_query or "Hi!"},
+                ],
+                temperature=0.7,
+                max_tokens=60,
+                timeout=5,
+            )
+            if result:
+                return result
+        except Exception as e:
+            logger.debug(f"LLM greeting generation failed: {e}")
+        return self._GREETING_RESPONSE
 
     def _generate_answer(self, query: str, context: str) -> Optional[str]:
         """Generate LLM answer (requires LiteLLM)."""
         try:
-            import requests
-            resp = requests.post(
-                LITELLM_BASE_URL.rstrip("/") + "/v1/chat/completions",
-                json={
-                    "model": LITELLM_MODEL,
-                    "messages": [
-                        {"role": "system", "content": (
-                            "You are a helpful assistant answering questions based on retrieved chat messages. "
-                            "Answer concisely in the same language as the query. "
-                            "If the context doesn't contain the answer, say so."
-                        )},
-                        {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"},
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 300,
-                },
-                headers={"Authorization": f"Bearer {LITELLM_API_KEY}",
-                         "Content-Type": "application/json"},
+            result = _llm_client.chat(
+                [
+                    {"role": "system", "content": (
+                        "You are a helpful assistant answering questions based on retrieved chat messages. "
+                        "Answer concisely in the same language as the query. "
+                        "If the context doesn't contain the answer, say so."
+                    )},
+                    {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"},
+                ],
+                temperature=0.3,
+                max_tokens=300,
                 timeout=10,
             )
-            resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+            if result:
+                return result
+            return None
         except Exception as e:
             logger.warning(f"LLM answer generation failed: {e}")
             return None
