@@ -12,5 +12,6 @@ build/
 
 # Search index & models (build artifacts, machine-specific)
 apps/corpchat/search_index/
+apps/corpchat/contacts_index/
 models/
 .pytest_cache/
