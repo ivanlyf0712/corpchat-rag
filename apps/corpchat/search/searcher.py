@@ -64,6 +64,46 @@ class Searcher:
         )
         return [(did, scores[did]) for did in sorted_ids]
 
+    # ── 多路检索组装 (RRF 融合输入) ─────────────────────────────
+    def _retrieve_parallel(
+        self,
+        query: str,
+        weights: Optional[Tuple[float, float]],
+        limit: int,
+        expand: bool = True,
+    ) -> List[Tuple[List[Tuple[str, float]], float]]:
+        """
+        组装加权 RRF 融合输入: 每条扩展查询一路结果。
+
+        当前唯一的路来源是 LLM 查询扩展:
+          原始查询 (ORIGINAL_QUERY_WEIGHT)
+          语义重写 (LLM_SEMANTIC_QUERY_WEIGHT)
+          关键词扩展 (LLM_KEYWORD_QUERY_WEIGHT)
+        每条路 = (结果列表, 权重)。未来新增检索路 (时序 / 图并行) 在此追加
+        一个 (结果列表, 权重) 条目即可, 无需修改调用方。各路相互独立,
+        未来可并行执行。
+        """
+        queries_with_weights: List[Tuple[str, float]] = [(query, ORIGINAL_QUERY_WEIGHT)]
+        try:
+            if expand and self.expander:
+                queries_with_weights = self.expander.expand(query)
+        except Exception as e:
+            logger.warning(f"查询扩展失败: {e}")
+
+        all_results: List[Tuple[List[Tuple[str, float]], float]] = []
+        for q, q_weight in queries_with_weights:
+            raw = self.embeddings.search(
+                _segment(q), limit=min(limit * 3, MAX_SEARCH_LIMIT), weights=weights
+            )
+            result_list: List[Tuple[str, float]] = []
+            for item in raw:
+                parsed = self._parse_txtai_result(item)
+                if parsed:
+                    result_list.append((parsed["id"], parsed["score"]))
+            all_results.append((result_list, q_weight))
+
+        return all_results
+
     # ── 图扩展 (纯结构, 直接 backend API) ──────────────────────
     def _graph_expand(self, results: List[Dict], max_expand: int = 3,
                        hop_discount: float = 0.8, limit: int = 20,
@@ -330,23 +370,7 @@ class Searcher:
             return output
 
         # ── 路径 B: 多查询扩展 + RRF ──
-        queries_with_weights: List[Tuple[str, float]] = [(query, ORIGINAL_QUERY_WEIGHT)]
-        try:
-            if expand and self.expander:
-                queries_with_weights = self.expander.expand(query)
-        except Exception as e:
-            logger.warning(f"查询扩展失败: {e}")
-
-        all_results: List[Tuple[List[Tuple[str, float]], float]] = []
-        for q, q_weight in queries_with_weights:
-            raw = self.embeddings.search(_segment(q), limit=min(limit * 3, MAX_SEARCH_LIMIT), weights=weights)
-            result_list: List[Tuple[str, float]] = []
-            for item in raw:
-                parsed = self._parse_txtai_result(item)
-                if parsed:
-                    result_list.append((parsed["id"], parsed["score"]))
-            all_results.append((result_list, q_weight))
-
+        all_results = self._retrieve_parallel(query, weights, limit, expand)
         fused = self._weighted_rrf_fusion(all_results)
         output: List[Dict] = []
         seen_ids = set()
