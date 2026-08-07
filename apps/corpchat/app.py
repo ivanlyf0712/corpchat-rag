@@ -36,6 +36,9 @@ from apps.corpchat.search import (
     SearchRouter,
 )
 
+# ── Shared Process-window rendering helpers (kept out of app.py) ──
+from apps.corpchat import process_window as _process_window
+
 # ── Agentic intent gate (greeting/system_info skip search) ──
 from apps.corpchat.agent import (
     Agent,
@@ -336,154 +339,33 @@ def _check_llm_available() -> bool:
     return _llm_client.is_available(timeout=5)
 
 def _build_agent_process_payload(tool_calls: list, steps: list, turn: dict) -> dict:
-    """Build the persisted Process-window payload for an agentic turn.
-
-    Structure:
-        {
-          "agentic": True,
-          "fallback": bool,
-          "tools": [
-            {
-              "name": "search_messages",
-              "query": "...",
-              "expanded_queries": [...],
-              "hit_count": N,
-              "previews": [...],
-            }, ...
-          ],
-        }
-    """
-    tools = []
-    for tc in tool_calls or []:
-        meta = tc.get("meta", {}) or {}
-        tools.append({
-            "name": tc.get("tool", "?"),
-            "query": tc.get("tool_input", ""),
-            "expanded_queries": meta.get("expanded_queries") or [],
-            "hit_count": meta.get("hit_count", 0),
-            "previews": meta.get("previews", []),
-        })
-    return {
-        "agentic": True,
-        "fallback": bool(turn.get("agent_fallback", False)),
-        "tools": tools,
-    }
+    """Backward-compatible wrapper for the Process-window payload builder."""
+    return _process_window.build_agent_process_payload(tool_calls, turn)
 
 
 def _stage_html(label: str, detail: str = "") -> str:
-    """HTML for a fade-in stage label with optional detail (compact)."""
-    html = f"<div style='font-size:0.85rem;animation:stageFadeIn 0.3s ease-in both;'>{label}"
-    if detail:
-        html += f" <span style='color:#6b7280;'>{detail}</span>"
-    return html + "</div>"
+    """Backward-compatible wrapper for stage fade-in HTML."""
+    return _process_window.stage_html(label, detail)
 
 
 def _fade_out_html(label: str) -> str:
-    """HTML for a fade-out stage label (used before the next stage replaces it)."""
-    return (f"<div style='font-size:0.85rem;animation:stageFadeOut 0.3s ease-out both;'>"
-            f"{label}</div>")
+    """Backward-compatible wrapper for stage fade-out HTML."""
+    return _process_window.fade_out_html(label)
 
 
 def _animate_stage(slot, label: str, detail: str = ""):
-    """Fade in a stage label into `slot` (an st.empty()). Caller then runs the
-    actual stage work, which holds the label until completion."""
-    slot.markdown(_stage_html(label, detail), unsafe_allow_html=True)
+    """Backward-compatible wrapper for animating a stage into `slot`."""
+    return _process_window.animate_stage(slot, label, detail)
 
 
 def _complete_stage(slot, label: str):
-    """Fade out the current stage label after its work completed (0.3s)."""
-    import time as _time
-    slot.markdown(_fade_out_html(label), unsafe_allow_html=True)
-    _time.sleep(0.3)
+    """Backward-compatible wrapper for fading a stage out of `slot`."""
+    return _process_window.complete_stage(slot, label)
 
 
 def _render_chat_history(history: list):
-    for turn in history:
-        with st.chat_message("user"):
-            st.markdown(turn["query"])
-        with st.chat_message("assistant"):
-            if turn.get("interrupted"):
-                st.info("Search was interrupted. This turn has no results.")
-            elif turn.get("status") == "processing":
-                st.markdown("_Processing your request…_")
-            elif turn.get("answer"):
-                st.markdown(turn["answer"])
-
-                # ── Unified Process window ──
-                process = turn.get("process") or {}
-                agentic = bool(process.get("agentic")) or bool(turn.get("agent_steps"))
-                fallback = bool(process.get("fallback", turn.get("agent_fallback", False)))
-                steps = turn.get("agent_steps", [])
-                total_ms = sum(s.get("duration_ms", 0) for s in steps)
-                n_tools = len(process.get("tools", [])) or sum(
-                    1 for s in steps if s.get("label") in ("search_messages", "search_contacts"))
-
-                # Window label: "Process" or "Process (agentic · ✅ · N tools · Xms)"
-                if agentic:
-                    badge = "⚠️ fallback" if fallback else "✅"
-                    label = f"Process (agentic · {badge} · {n_tools} tools · {total_ms}ms)"
-                else:
-                    label = "Process"
-
-                with st.expander(label, expanded=False):
-                    if agentic:
-                        # Per-tool expandable sub-windows, compact styling
-                        tools = process.get("tools", [])
-                        for t in tools:
-                            t_name = t.get("name", "?")
-                            t_query = t.get("query", "")
-                            expanded_qs = t.get("expanded_queries", [])
-                            hit_count = t.get("hit_count", 0)
-                            previews = t.get("previews", [])
-                            with st.expander(
-                                f"{'🔍' if t_name == 'search_messages' else '👤'} {t_name} · "
-                                f"{hit_count} hits",
-                                expanded=False,
-                            ):
-                                st.markdown(
-                                    f"<div style='font-size:0.85rem;color:#9ca3af;'>Query: "
-                                    f"<code>{t_query}</code></div>",
-                                    unsafe_allow_html=True,
-                                )
-                                if expanded_qs:
-                                    st.markdown(
-                                        "<div style='font-size:0.8rem;color:#6b7280;'>"
-                                        "Expanded queries:</div>",
-                                        unsafe_allow_html=True,
-                                    )
-                                    for eq in expanded_qs:
-                                        st.markdown(
-                                            f"<div style='font-size:0.8rem;padding:1px 8px;"
-                                            f"margin:1px 0;background:#1f2937;border-radius:4px;"
-                                            f"border-left:3px solid #3b82f6;'>{eq}</div>",
-                                            unsafe_allow_html=True,
-                                        )
-                                if previews:
-                                    for p in previews[:5]:
-                                        sender = p.get("sender") or p.get("name") or "?"
-                                        text = p.get("text", "")
-                                        score = p.get("score", "")
-                                        score_str = f" · {score}" if score != "" else ""
-                                        st.markdown(
-                                            f"<div style='font-size:0.8rem;padding:1px 0;'>"
-                                            f"<b>{sender}</b>{score_str} — {text[:120]}</div>",
-                                            unsafe_allow_html=True,
-                                        )
-                    else:
-                        if turn.get("raw_hits"):
-                            st.dataframe(
-                                pd.DataFrame(turn["raw_hits"]),
-                                column_config={
-                                    "id": st.column_config.TextColumn("Message ID"),
-                                    "text": st.column_config.TextColumn("Content"),
-                                    "score": st.column_config.NumberColumn("Score"),
-                                    "metadata": st.column_config.TextColumn("Metadata"),
-                                },
-                                hide_index=True,
-                                use_container_width=True,
-                            )
-                        else:
-                            st.caption("No raw hits available for this turn.")
+    """Backward-compatible wrapper for rendering the chat history."""
+    return _process_window.render_chat_history(history, st, pd)
 
 # ═══════════════════════════════════════ pages ════════════════════════════════════
 def _render_search_page():

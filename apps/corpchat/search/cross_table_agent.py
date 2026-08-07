@@ -374,6 +374,7 @@ class CrossTableAgent:
             for tc in tool_calls:
                 name = tc["name"]
                 _t0 = _time.perf_counter()
+                actual_query = search_query
                 if name == "search_messages":
                     _stage("🔍", f"using search_messages... query: {search_query}")
                     msg_result = search_messages.invoke(
@@ -384,8 +385,9 @@ class CrossTableAgent:
                         msg_result = search_messages.invoke(
                             {"query": user_input, "expand": self.expand, "use_rerank": self.use_rerank}
                         )
+                        actual_query = user_input
                     _t1 = _time.perf_counter()
-                    self._add_step("🔍", "search_messages", int((_t1 - _t0) * 1000), f"Query: '{search_query}'")
+                    self._add_step("🔍", "search_messages", int((_t1 - _t0) * 1000), f"Query: '{actual_query}'")
                     from .tools import get_last_search_meta
                     meta = get_last_search_meta()
                 elif name == "search_contacts":
@@ -393,13 +395,14 @@ class CrossTableAgent:
                     contact_result = search_contacts.invoke({"query": search_query})
                     if self._is_empty_result(contact_result) and search_query != user_input:
                         contact_result = search_contacts.invoke({"query": user_input})
+                        actual_query = user_input
                     _t1 = _time.perf_counter()
-                    self._add_step("👤", "search_contacts", int((_t1 - _t0) * 1000), f"Query: '{search_query}'")
+                    self._add_step("👤", "search_contacts", int((_t1 - _t0) * 1000), f"Query: '{actual_query}'")
                     from .tools import get_last_contact_meta
                     meta = get_last_contact_meta()
                 executed_calls.append({
                     "tool": name,
-                    "tool_input": search_query,
+                    "tool_input": actual_query,
                     "observation": (msg_result if name == "search_messages" else contact_result)[:200],
                     "meta": meta,
                 })
