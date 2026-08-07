@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CorpChat Intelligence – Streamlit App
-View contacts, messages, statistics, a chat-style conversation viewer, semantic search (chatbox), and Onyx Chat.
+View contacts, messages, statistics, a chat-style conversation viewer, and semantic search (chatbox).
 """
 
 import sys
@@ -19,7 +19,6 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from core.db import get_db_connection
-from core.config import OLLAMA_URL, RAG_MODEL
 
 # ── Load .env explicitly so the UI can reach LiteLLM & search config ──
 try:
@@ -28,11 +27,13 @@ try:
 except ImportError:
     pass
 
-# ── Import Onyx-style search from search.py ──
+# ── Import search from search.py ──
 from apps.corpchat.search import (
     load_index,
     Searcher,
     DEFAULT_INDEX_PATH,
+    LiteLLMClient,
+    SearchRouter,
 )
 
 # ── Agentic intent gate (greeting/system_info skip search) ──
@@ -47,11 +48,28 @@ from apps.corpchat.agent import (
 # Module-level intent classifier (cached across renders — deterministic")
 _intent_classifier = IntentClassifier()
 
+# ── Initialize DB-backed agent memory table ──
+try:
+    from core.db import init_agent_memory_table
+    init_agent_memory_table()
+except Exception:
+    pass
+
 # ── LiteLLM config ──
 import os as _os
 LITELLM_API_KEY = _os.getenv("LITELLM_API_KEY", "")
 LITELLM_BASE_URL = _os.getenv("LITELLM_BASE_URL", "https://your-litellm-proxy.example.com")
 LITELLM_MODEL = _os.getenv("LITELLM_MODEL", "dseek-v4-flash")
+
+# ── Shared LiteLLM client (single instance for all API calls) ──
+_llm_client = LiteLLMClient(
+    api_base=LITELLM_BASE_URL,
+    api_key=LITELLM_API_KEY,
+    model=LITELLM_MODEL,
+)
+
+# ── LLM Router: decides whether to search or chat ──
+_search_router = SearchRouter(api_base=LITELLM_BASE_URL, api_key=LITELLM_API_KEY, model=LITELLM_MODEL)
 
 # ═══════════════════════════════════════ page config ════════════════════════════════════
 st.set_page_config(
@@ -74,6 +92,8 @@ h1 { border-bottom: 2px solid #30363d; padding-bottom: 0.3em; }
 .streamlit-expander { border: 1px solid #30363d; border-radius: 6px; background: #161b22; }
 [data-testid="stMetric"] { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
 .stChatInput { border-top: 1px solid #30363d; }
+@keyframes stageFadeIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }
+@keyframes stageFadeOut { from { opacity: 1; } to { opacity: 0; } }
 </style>
 """, unsafe_allow_html=True)
 
@@ -84,11 +104,9 @@ with st.sidebar:
     st.divider()
     page = st.radio(
         "Navigate",
-        ["Search", "Contacts", "Messages", "Overview", "Chat Viewer", "Onyx Chat"],
+        ["Search", "Contacts", "Messages", "Overview", "Chat Viewer"],
         index=0,
     )
-    if page == "Onyx Chat":
-        st.caption("Deprecated — will be removed in a future release.")
 
 # ═══════════════════════════════════════ DB helpers ════════════════════════════════════
 @st.cache_data(ttl=30)
@@ -206,7 +224,22 @@ def get_messages_for_conversation(open_kfid: str):
     return fetch_conversation(open_kfid)
 
 # ═══════════════════════════════════ backward-compat seam ════════════════════════════════════
-def search_messages_onyx(
+def _docs_to_tuples(docs: list) -> list:
+    """Convert Searcher result dicts to the tuple format used by callers."""
+    tuples = []
+    for doc in docs:
+        meta = doc.get("metadata", {})
+        tuples.append((
+            doc.get("id", ""),
+            doc.get("text", ""),
+            doc.get("score", 0.0),
+            meta.get("customer_name", ""),
+            meta.get("company", ""),
+            meta.get("label", ""),
+        ))
+    return tuples
+
+def search_messages(
     query: str,
     top_k: int = 5,
     use_rerank: bool = True,
@@ -247,18 +280,7 @@ def search_messages_onyx(
             graph_expand=graph_expand,
             label_filter=label_filter or None,
         )
-        tuple_results = []
-        for doc in raw_results:
-            meta = doc.get("metadata", {})
-            tuple_results.append((
-                doc.get("id", ""),
-                doc.get("text", ""),
-                doc.get("score", 0.0),
-                meta.get("customer_name", ""),
-                meta.get("company", ""),
-                meta.get("label", ""),
-            ))
-        return tuple_results
+        return _docs_to_tuples(raw_results)
     except Exception as e:
         st.error(f"Search failed: {e}")
         return []
@@ -267,30 +289,20 @@ def search_messages_onyx(
 def generate_answer_litellm(query: str, context: str) -> str:
     if not LITELLM_API_KEY:
         return "LiteLLM API key not configured. Set LITELLM_API_KEY in .env."
-    url = LITELLM_BASE_URL.rstrip("/") + "/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {LITELLM_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": LITELLM_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant answering questions based on retrieved chat messages. Answer concisely in the same language as the query. If the context doesn't contain the answer, say so."
-            },
-            {
-                "role": "user",
-                "content": f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"
-            }
-        ],
-        "temperature": 0.3,
-        "max_tokens": 300,
-    }
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"Error generating answer: {e}"
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant answering questions based on retrieved chat messages. Answer concisely in the same language as the query. If the context doesn't contain the answer, say so."
+        },
+        {
+            "role": "user",
+            "content": f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+        }
+    ]
+    result = _llm_client.chat(messages, temperature=0.3, max_tokens=300, timeout=15)
+    if result:
+        return result
+    return "Error generating answer: LLM call failed."
 
 # ═══════════════════════════════════════ search logic ════════════════════════════════════
 @st.cache_resource
@@ -314,35 +326,76 @@ def _run_search(query: str, top_k: int, use_rerank: bool, expand: bool, graph_ex
             graph_expand=graph_expand,
             label_filter=label_filter or None,
         )
-        tuple_results = []
-        for doc in raw_results:
-            meta = doc.get("metadata", {})
-            tuple_results.append((
-                doc.get("id", ""),
-                doc.get("text", ""),
-                doc.get("score", 0.0),
-                meta.get("customer_name", ""),
-                meta.get("company", ""),
-                meta.get("label", ""),
-            ))
-        return tuple_results, raw_results
+        return _docs_to_tuples(raw_results), raw_results
     except Exception as e:
         st.error(f"Search failed: {e}")
         return [], []
 
 def _check_llm_available() -> bool:
     """Quick check if LiteLLM is reachable."""
-    if not LITELLM_API_KEY:
-        return False
-    try:
-        resp = requests.get(
-            LITELLM_BASE_URL.rstrip("/") + "/v1/models",
-            headers={"Authorization": f"Bearer {LITELLM_API_KEY}"},
-            timeout=5,
-        )
-        return resp.status_code == 200
-    except Exception:
-        return False
+    return _llm_client.is_available(timeout=5)
+
+def _build_agent_process_payload(tool_calls: list, steps: list, turn: dict) -> dict:
+    """Build the persisted Process-window payload for an agentic turn.
+
+    Structure:
+        {
+          "agentic": True,
+          "fallback": bool,
+          "tools": [
+            {
+              "name": "search_messages",
+              "query": "...",
+              "expanded_queries": [...],
+              "hit_count": N,
+              "previews": [...],
+            }, ...
+          ],
+        }
+    """
+    tools = []
+    for tc in tool_calls or []:
+        meta = tc.get("meta", {}) or {}
+        tools.append({
+            "name": tc.get("tool", "?"),
+            "query": tc.get("tool_input", ""),
+            "expanded_queries": meta.get("expanded_queries") or [],
+            "hit_count": meta.get("hit_count", 0),
+            "previews": meta.get("previews", []),
+        })
+    return {
+        "agentic": True,
+        "fallback": bool(turn.get("agent_fallback", False)),
+        "tools": tools,
+    }
+
+
+def _stage_html(label: str, detail: str = "") -> str:
+    """HTML for a fade-in stage label with optional detail (compact)."""
+    html = f"<div style='font-size:0.85rem;animation:stageFadeIn 0.3s ease-in both;'>{label}"
+    if detail:
+        html += f" <span style='color:#6b7280;'>{detail}</span>"
+    return html + "</div>"
+
+
+def _fade_out_html(label: str) -> str:
+    """HTML for a fade-out stage label (used before the next stage replaces it)."""
+    return (f"<div style='font-size:0.85rem;animation:stageFadeOut 0.3s ease-out both;'>"
+            f"{label}</div>")
+
+
+def _animate_stage(slot, label: str, detail: str = ""):
+    """Fade in a stage label into `slot` (an st.empty()). Caller then runs the
+    actual stage work, which holds the label until completion."""
+    slot.markdown(_stage_html(label, detail), unsafe_allow_html=True)
+
+
+def _complete_stage(slot, label: str):
+    """Fade out the current stage label after its work completed (0.3s)."""
+    import time as _time
+    slot.markdown(_fade_out_html(label), unsafe_allow_html=True)
+    _time.sleep(0.3)
+
 
 def _render_chat_history(history: list):
     for turn in history:
@@ -355,21 +408,82 @@ def _render_chat_history(history: list):
                 st.markdown("_Processing your request…_")
             elif turn.get("answer"):
                 st.markdown(turn["answer"])
-                with st.expander("Details", expanded=False):
-                    if turn.get("raw_hits"):
-                        st.dataframe(
-                            pd.DataFrame(turn["raw_hits"]),
-                            column_config={
-                                "id": st.column_config.TextColumn("Message ID"),
-                                "text": st.column_config.TextColumn("Content"),
-                                "score": st.column_config.NumberColumn("Score"),
-                                "metadata": st.column_config.TextColumn("Metadata"),
-                            },
-                            hide_index=True,
-                            use_container_width=True,
-                        )
+
+                # ── Unified Process window ──
+                process = turn.get("process") or {}
+                agentic = bool(process.get("agentic")) or bool(turn.get("agent_steps"))
+                fallback = bool(process.get("fallback", turn.get("agent_fallback", False)))
+                steps = turn.get("agent_steps", [])
+                total_ms = sum(s.get("duration_ms", 0) for s in steps)
+                n_tools = len(process.get("tools", [])) or sum(
+                    1 for s in steps if s.get("label") in ("search_messages", "search_contacts"))
+
+                # Window label: "Process" or "Process (agentic · ✅ · N tools · Xms)"
+                if agentic:
+                    badge = "⚠️ fallback" if fallback else "✅"
+                    label = f"Process (agentic · {badge} · {n_tools} tools · {total_ms}ms)"
+                else:
+                    label = "Process"
+
+                with st.expander(label, expanded=False):
+                    if agentic:
+                        # Per-tool expandable sub-windows, compact styling
+                        tools = process.get("tools", [])
+                        for t in tools:
+                            t_name = t.get("name", "?")
+                            t_query = t.get("query", "")
+                            expanded_qs = t.get("expanded_queries", [])
+                            hit_count = t.get("hit_count", 0)
+                            previews = t.get("previews", [])
+                            with st.expander(
+                                f"{'🔍' if t_name == 'search_messages' else '👤'} {t_name} · "
+                                f"{hit_count} hits",
+                                expanded=False,
+                            ):
+                                st.markdown(
+                                    f"<div style='font-size:0.85rem;color:#9ca3af;'>Query: "
+                                    f"<code>{t_query}</code></div>",
+                                    unsafe_allow_html=True,
+                                )
+                                if expanded_qs:
+                                    st.markdown(
+                                        "<div style='font-size:0.8rem;color:#6b7280;'>"
+                                        "Expanded queries:</div>",
+                                        unsafe_allow_html=True,
+                                    )
+                                    for eq in expanded_qs:
+                                        st.markdown(
+                                            f"<div style='font-size:0.8rem;padding:1px 8px;"
+                                            f"margin:1px 0;background:#1f2937;border-radius:4px;"
+                                            f"border-left:3px solid #3b82f6;'>{eq}</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                if previews:
+                                    for p in previews[:5]:
+                                        sender = p.get("sender") or p.get("name") or "?"
+                                        text = p.get("text", "")
+                                        score = p.get("score", "")
+                                        score_str = f" · {score}" if score != "" else ""
+                                        st.markdown(
+                                            f"<div style='font-size:0.8rem;padding:1px 0;'>"
+                                            f"<b>{sender}</b>{score_str} — {text[:120]}</div>",
+                                            unsafe_allow_html=True,
+                                        )
                     else:
-                        st.caption("No raw hits available for this turn.")
+                        if turn.get("raw_hits"):
+                            st.dataframe(
+                                pd.DataFrame(turn["raw_hits"]),
+                                column_config={
+                                    "id": st.column_config.TextColumn("Message ID"),
+                                    "text": st.column_config.TextColumn("Content"),
+                                    "score": st.column_config.NumberColumn("Score"),
+                                    "metadata": st.column_config.TextColumn("Metadata"),
+                                },
+                                hide_index=True,
+                                use_container_width=True,
+                            )
+                        else:
+                            st.caption("No raw hits available for this turn.")
 
 # ═══════════════════════════════════════ pages ════════════════════════════════════
 def _render_search_page():
@@ -397,7 +511,18 @@ def _render_search_page():
             use_rerank = st.checkbox("Reranker", value=True, help="Cross-encoder reranking", disabled=st.session_state.searching)
             expand = st.checkbox("LLM expansion", value=True, help="Expand query via LiteLLM", disabled=st.session_state.searching)
             graph_expand = st.slider("Graph hops", min_value=0, max_value=3, value=1, disabled=st.session_state.searching)
-            agentic = st.checkbox("Agentic mode", value=False, help="Agent decides params", disabled=st.session_state.searching)
+            # Persist agent toggle across reruns (default: activated)
+            if "agent_enabled" not in st.session_state:
+                st.session_state.agent_enabled = True
+
+            agent_enabled = st.checkbox(
+                "🤖 Agent",
+                value=st.session_state.agent_enabled,
+                key="agent_cb",
+                help="Unified agent: cross-table reasoning + smart search",
+                disabled=st.session_state.searching,
+            )
+            st.session_state.agent_enabled = agent_enabled
         with st.expander("Filters", expanded=False):
             label_filter = st.text_input("Label filter", value="", help="e.g. quotation_request", disabled=st.session_state.searching)
             top_k = st.slider("Top-k", min_value=1, max_value=20, value=5, disabled=st.session_state.searching)
@@ -410,18 +535,62 @@ def _render_search_page():
             query = pending_turn["query"]
 
             # ── Intent gate: greeting/system_info/clarify skip search ──
-            intent = _intent_classifier.classify(query)
-            if intent in (INTENT_GREETING, INTENT_SYSTEM_INFO, INTENT_CLARIFY):
+            # Use Agent.process() to leverage LLM-generated greetings and DB-backed memory
+            if "agent" not in st.session_state:
+                try:
+                    from apps.corpchat.agent import Agent, load_agent
+                    try:
+                        st.session_state.agent = load_agent()
+                    except FileNotFoundError:
+                        # No search index built yet — create agent without searcher
+                        # It can still handle greetings and system_info via LLM
+                        st.session_state.agent = Agent()
+                except Exception:
+                    st.session_state.agent = None
+
+            agent = st.session_state.agent
+            if agent is None:
+                # Fallback: if agent fails to load, still try LLM for natural responses
+                intent = _intent_classifier.classify(query)
                 if intent == INTENT_GREETING:
-                    answer = Agent._GREETING_RESPONSE
+                    if _check_llm_available():
+                        chat_reply = _llm_client.chat([
+                            {"role": "system", "content": "You are a friendly assistant. Reply to greetings naturally and warmly in the same language as the user. Keep it short. Do NOT mention you are an AI."},
+                            {"role": "user", "content": query},
+                        ], temperature=0.7, max_tokens=60, timeout=5)
+                        answer = chat_reply or "Hello! How can I help you today?"
+                    else:
+                        answer = "Hello! I'm CorpChat Intelligence. How can I help you today?"
                 elif intent == INTENT_SYSTEM_INFO:
-                    answer = Agent._SYSTEM_INFO_RESPONSE
-                else:
+                    answer = (
+                        "I'm **CorpChat Intelligence** — an AI-powered search assistant for corporate chat messages.\n\n"
+                        "**Capabilities:**\n"
+                        "- Semantic hybrid search (BM25 + vector embeddings)\n"
+                        "- LLM query expansion for better recall\n"
+                        "- Graph-enhanced retrieval (traverses conversation relationships)\n"
+                        "- Cross-encoder reranking for result relevance\n\n"
+                        "**Data scope:**\n"
+                        "- Indexed corporate WeCom conversations\n"
+                        "- Topics: business inquiries, quotations, investments, logistics, tech support,\n"
+                        "  invoices, contracts, quality issues, scam/phishing detection\n"
+                        "- Bilingual (Chinese + English) messages\n\n"
+                        "**Limitations:**\n"
+                        "- Can only search within the indexed message corpus\n"
+                        "- Cannot access external data or real-time feeds\n"
+                        "- LLM-dependent features (query expansion, agentic mode) degrade gracefully\n"
+                        "  when the LLM endpoint is unavailable\n\n"
+                        "How can I help you today?"
+                    )
+                elif intent == INTENT_CLARIFY:
                     answer = (
                         "I'd be happy to clarify! Could you rephrase your question or "
                         "provide more specific details about what you're looking for?"
                     )
-                # Render a plain reply — no search, no progress window
+                else:
+                    answer = (
+                        "I'd be happy to help! Could you rephrase your question or "
+                        "provide more specific details about what you're looking for?"
+                    )
                 with st.chat_message("assistant"):
                     st.markdown(answer)
                 pending_turn["answer"] = answer
@@ -431,46 +600,167 @@ def _render_search_page():
                 st.rerun()
                 return
 
+            # Ensure session_id persists across reruns
+            if "session_id" not in st.session_state:
+                st.session_state.session_id = agent.session_id
+            else:
+                agent.session_id = st.session_state.session_id
+
+            # ── Unified Agent mode ──
+            if agent_enabled:
+                with st.chat_message("assistant"):
+                    with st.status("🤖 Agent processing...", expanded=True) as status:
+                        slot = st.empty()
+                        stage_labels = []
+
+                        def _on_stage(label, detail=""):
+                            stage_labels.append(label)
+                            _animate_stage(slot, label, detail)
+
+                        st.write("🤖 Unified agent routing query...")
+                        try:
+                            from apps.corpchat.search import CrossTableAgent
+                            ct_agent = CrossTableAgent(
+                                api_base=LITELLM_BASE_URL,
+                                api_key=LITELLM_API_KEY,
+                                model=LITELLM_MODEL,
+                                expand=expand,
+                                use_rerank=use_rerank,
+                            )
+                            result = ct_agent.process(query, on_stage=_on_stage)
+                            answer = result["output"]
+                            tool_calls = result.get("tool_calls", [])
+                            steps = result.get("steps", [])
+                            for tc in tool_calls:
+                                st.write(f"   • {tc.get('tool', '?')}: {str(tc.get('tool_input', ''))[:60]}")
+                            if result.get("fallback"):
+                                st.write("   ⚠️ Used fallback mode")
+                        except Exception as e:
+                            st.write(f"   ⚠️ Agent failed: {e}")
+                            answer = f"Agent error: {e}"
+                            steps = []
+                        _complete_stage(slot, stage_labels[-1] if stage_labels else "done")
+                        status.update(label="Agent complete", state="complete")
+                pending_turn["answer"] = answer
+                pending_turn["raw_hits"] = []
+                pending_turn["status"] = "done"
+                pending_turn["agent_steps"] = steps
+                pending_turn["agent_fallback"] = result.get("fallback", False) if 'result' in dir() else False
+                # Persist per-tool process payload for the Process window
+                pending_turn["process"] = _build_agent_process_payload(tool_calls, steps, pending_turn)
+                st.session_state.searching = False
+                st.rerun()
+                return
+
+            # ── Original pipeline (non-agent mode) ──
+            intent, answer, search_results = agent.process(
+                query,
+                top_k=top_k,
+                use_rerank=use_rerank,
+                expand=expand,
+                graph_expand=graph_expand,
+                label_filter=label_filter or None,
+                search_mode="hybrid",
+            )
+            raw_hits = search_results if isinstance(search_results, list) else []
+
+            # Render non-search intents immediately
+            if intent in (INTENT_GREETING, INTENT_SYSTEM_INFO, INTENT_CLARIFY):
+                with st.chat_message("assistant"):
+                    st.markdown(answer)
+                pending_turn["answer"] = answer
+                pending_turn["raw_hits"] = raw_hits
+                pending_turn["status"] = "done"
+                st.session_state.searching = False
+                st.rerun()
+                return
+
             # ── Real search intent: run the full pipeline ──
             with st.chat_message("assistant"):
                 with st.status("Processing query...", expanded=True) as status:
+                    slot = st.empty()
+                    # Stage 0: LLM router decides whether to search
+                    _animate_stage(slot, "0/6 routing...")
+                    router_decision = _search_router.decide(query)
+                    _complete_stage(slot, "0/6 routing...")
+                    st.write(f"   Router: search={router_decision['search']}, query={router_decision['query']!r}")
+                    if not router_decision["search"]:
+                        # Direct chat reply, no retrieval
+                        if llm_ok:
+                            chat_reply = _llm_client.chat([
+                                {"role": "system", "content": "You are a friendly assistant. Reply concisely in the same language as the user."},
+                                {"role": "user", "content": query},
+                            ], temperature=0.3, max_tokens=200, timeout=15)
+                            answer = chat_reply or "I'm here to help. What would you like to search?"
+                        else:
+                            answer = "I'm here to help. What would you like to search?"
+                        status.update(label="Done", state="complete")
+                        pending_turn["answer"] = answer
+                        pending_turn["raw_hits"] = []
+                        pending_turn["status"] = "done"
+                        st.session_state.searching = False
+                        st.rerun()
+                        return
+                    query = router_decision["query"] or query
+
                     # Stage 1: Query expansion
-                    st.write("1/6 Query expansion...")
+                    _animate_stage(slot, "1/6 query expansion...")
                     llm_ok = _check_llm_available()
-                    if expand and not llm_ok:
+                    expansion_queries = []
+                    if expand and llm_ok:
+                        try:
+                            from apps.corpchat.search import QueryExpander
+                            expander = QueryExpander()
+                            expansion_queries = expander.expand(query, use_cache=False)
+                            if len(expansion_queries) > 1:
+                                st.write(f"   Generated {len(expansion_queries) - 1} expanded queries:")
+                                # Animation container for expanded queries
+                                anim_container = st.container()
+                                import time as _time
+                                for idx, (eq, weight) in enumerate(expansion_queries[1:], 1):
+                                    with anim_container:
+                                        st.markdown(f"<div style='animation: fadeInRight 0.5s ease-in {idx * 0.1}s both; padding: 4px 8px; margin: 2px 0; background: #1f2937; border-radius: 4px; border-left: 3px solid #3b82f6;'>{eq}</div>", unsafe_allow_html=True)
+                                    _time.sleep(0.1)
+                            else:
+                                st.write("   No expansion needed")
+                        except Exception as e:
+                            st.write(f"   ⚠️ Expansion failed: {e}")
+                            expand = False
+                    elif expand and not llm_ok:
                         st.write("   ⚠️ LLM unavailable — skipping expansion")
                         expand = False
-                    if agentic and not llm_ok:
-                        st.write("   ⚠️ LLM unavailable — disabling agentic mode")
-                        agentic = False
 
                     # Stage 2: Hybrid search
-                    st.write("2/6 Hybrid search (BM25 + vector)...")
+                    _animate_stage(slot, "2/6 hybrid search (BM25 + vector)...")
                     results, raw_hits = _run_search(
-                        query, top_k, use_rerank, expand, graph_expand, agentic, label_filter
+                        query, top_k, use_rerank, expand, graph_expand, False, label_filter
                     )
+                    _complete_stage(slot, "2/6 hybrid search...")
                     st.write(f"   Found {len(raw_hits)} hits")
 
                     # Stage 3: RRF fusion
-                    st.write("3/6 RRF fusion...")
+                    _animate_stage(slot, "3/6 RRF fusion...")
+                    _complete_stage(slot, "3/6 RRF fusion...")
                     st.write("   Merged expanded queries")
 
                     # Stage 4: Graph expansion
-                    st.write("4/6 Graph expansion...")
+                    _animate_stage(slot, "4/6 graph expansion...")
+                    _complete_stage(slot, "4/6 graph expansion...")
                     if graph_expand > 0:
                         st.write(f"   {graph_expand} hops traversed")
                     else:
                         st.write("   Skipped (0 hops)")
 
                     # Stage 5: Reranking
-                    st.write("5/6 Reranking...")
+                    _animate_stage(slot, "5/6 reranking...")
+                    _complete_stage(slot, "5/6 reranking...")
                     if use_rerank:
                         st.write("   Cross-encoder applied")
                     else:
                         st.write("   Skipped")
 
                     # Stage 6: LLM answer generation
-                    st.write("6/6 Generating answer...")
+                    _animate_stage(slot, "6/6 generating answer...")
                     context_parts = []
                     for hit in raw_hits[: top_k * 2]:
                         content = hit.get("text", "") if isinstance(hit, dict) else ""
@@ -482,6 +772,7 @@ def _render_search_page():
                         answer = generate_answer_litellm(query, context)
                     else:
                         answer = "LLM is unavailable. Here are the retrieved messages:\n\n" + "\n\n---\n\n".join(context_parts[:3])
+                    _complete_stage(slot, "6/6 generating answer...")
 
                     status.update(label="Search complete!", state="complete")
 
@@ -556,13 +847,3 @@ elif page == "Chat Viewer":
                     is_user = row["origin"] == "3"
                     with st.chat_message("user" if is_user else "assistant"):
                         st.markdown(f"**{row['external_userid']}** ({row.get('label', '')})\n\n{row['content']}")
-
-elif page == "Onyx Chat":
-    # TODO: retire this tab — kept for backward compatibility
-    st.title("Onyx Chat (deprecated)")
-    st.caption("This tab will be removed in a future release. Use Search for the chat experience.")
-    try:
-        iframe_url = OLLAMA_URL or "http://localhost:11434"
-        st.components.v1.iframe(iframe_url, height=600, scrolling=True)
-    except Exception:
-        st.warning("Could not load Onyx Chat.")

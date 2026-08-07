@@ -31,10 +31,13 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+import json
+
 from apps.corpchat.search import (
     load_index,
     DEFAULT_INDEX_PATH,
     _clean_text_from_enriched,
+    Searcher,
 )
 
 
@@ -70,6 +73,9 @@ def extract_graph_data(index_path: str, max_nodes: int = 0, min_edge_weight: flo
     else:
         selected = set(all_nodes)
 
+    # Build a Searcher to access structured tags metadata
+    searcher = Searcher(embeddings)
+
     # 构建节点列表
     nodes = []
     for nid in sorted(selected):
@@ -77,15 +83,20 @@ def extract_graph_data(index_path: str, max_nodes: int = 0, min_edge_weight: flo
         doc_id = attrs.get("id", str(nid))
         text = attrs.get("text", "")
 
-        # 从文本中提取标签作为分组
+        # 从结构化 tags 中提取标签作为分组 (不再解析文本中的 Metadata 字符串)
         label = "unknown"
-        if "Metadata:" in text:
-            meta_part = text.split("Metadata:")[-1]
-            for part in meta_part.split(";"):
-                part = part.strip()
-                if part.startswith("label="):
-                    label = part.split("=", 1)[1]
-                    break
+        doc = searcher._fetch_one_doc(doc_id) if doc_id else None
+        if doc:
+            label = doc.get("metadata", {}).get("label", "unknown") or "unknown"
+        elif attrs.get("tags"):
+            # Fallback: graph node attributes may carry tags directly
+            try:
+                tags = attrs["tags"]
+                if isinstance(tags, str):
+                    tags = json.loads(tags)
+                label = tags.get("label", "unknown") or "unknown"
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
 
         # 生成简短的显示标签
         text_clean = _clean_text_from_enriched(text)

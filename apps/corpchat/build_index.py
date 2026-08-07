@@ -2,7 +2,7 @@
 """
 build_index.py — 构建 txtai 搜索索引 (兼容 search.py 的增强索引)
 =================================================================
-基于 search.py 的 IndexBuilder 类，提供句子级分块和丰富化功能。
+基于 search 包的 IndexBuilder 类，提供句子级分块和丰富化功能。
 
 用法:
   # 直接运行 (独立脚本)
@@ -30,7 +30,7 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from core.config import DB_CONFIG
+from apps.corpchat.search import IndexBuilder, DEFAULT_INDEX_PATH  # noqa: E402
 
 # ── 日志 ──
 logging.basicConfig(
@@ -41,7 +41,7 @@ logger = logging.getLogger("build-index")
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 复用 search.py 中的 IndexBuilder
+# 复用 search 包中的 IndexBuilder
 # 参考 analysis_report.md §2.2 (分块) 和 §2.3 (丰富化)
 # ═══════════════════════════════════════════════════════════════════
 
@@ -50,28 +50,14 @@ def _build_via_search_module(force: bool = False,
                               chunk_size: int = 256,
                               index_path: str | None = None) -> int:
     """
-    通过 search.py 的 IndexBuilder 构建索引。
+    通过 search 包的 IndexBuilder 构建索引。
 
     这种方式会执行句子级分块 + 丰富化，与 search.py 的搜索功能完全兼容。
 
     Returns: 索引中的文档块总数
     """
-    # 动态导入以避免在 import 阶段就产生依赖
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../.."))
-
-    # 从 search.py 导入 IndexBuilder (位于同一目录)
-    sys.path.insert(0, os.path.dirname(__file__))
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "search_module",
-        os.path.join(os.path.dirname(__file__), "search.py")
-    )
-    search_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(search_module)
-
-    builder = search_module.IndexBuilder(
-        index_path=index_path or search_module.DEFAULT_INDEX_PATH,
+    builder = IndexBuilder(
+        index_path=index_path or DEFAULT_INDEX_PATH,
         chunk_size=chunk_size,
     )
     enable_graph = graph_mode != "off"
@@ -95,6 +81,8 @@ def _build_legacy(dsn: str, model_path: str, index_dir: str) -> int:
     """
     import txtai
     import psycopg2
+
+    from core.config import DB_CONFIG
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
@@ -202,6 +190,7 @@ def main():
     # ── 旧版兼容模式 ──
     if args.legacy:
         logger.info("使用旧版模式 (不分块, 不丰富化)")
+        from core.config import DB_CONFIG
         dsn = (
             f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}"
             f"@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"

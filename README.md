@@ -1,12 +1,12 @@
 # CorpChat RAG
 
-企业微信对话智能搜索与 RAG 系统。基于 txtai 混合搜索 + LLM 查询扩展 + 交叉编码器重排序的 Onyx 风格搜索框架。
+企业微信对话智能搜索与 RAG 系统。基于 txtai 混合搜索 + LLM 查询扩展 + 交叉编码器重排序的搜索框架。
 
 ## 功能特性
 
-- 🔍 **Onyx 风格搜索**: 混合搜索 (BM25 + 向量) + LLM 查询扩展 + 加权 RRF 融合
+- 🔍 **混合搜索**: BM25 + 向量 + LLM 查询扩展 + 加权 RRF 融合
 - 🕸️ **图增强搜索**: 基于 txtai 图的一跳邻居扩展
-- ⚡ **交叉编码器重排序**: 使用 cross-encoder/ms-marco-MiniLM-L-6-v2
+- ⚡ **交叉编码器重排序**: 使用 BAAI/bge-reranker-base (中文/多语言)
 - 💬 **Streamlit 交互界面**: 联系人、消息、聊天记录、语义搜索一体化
 - 🤖 **RAG 问答**: 基于 LiteLLM 的自然语言答案生成
 
@@ -67,10 +67,18 @@ python apps/corpchat/search.py synthetic-benchmark
 corpchat-rag/
 ├── apps/corpchat/
 │   ├── app.py                # Streamlit 交互界面
-│   ├── search.py             # 搜索核心引擎 (IndexBuilder, Searcher, Reranker, etc.)
+│   ├── search.py             # CLI 入口 (薄封装)
+│   ├── search/               # 搜索核心引擎包
+│   │   ├── searcher.py       # Searcher (混合搜索 + RRF + 图扩展)
+│   │   ├── index_builder.py  # IndexBuilder (分块 + 丰富化)
+│   │   ├── query_expander.py # QueryExpander (LLM 查询扩展)
+│   │   ├── reranker.py       # Reranker (交叉编码器)
+│   │   ├── agentic.py        # AgenticDecider (参数决策)
+│   │   ├── litellm_client.py # LiteLLMClient (统一 API 调用)
+│   │   ├── config.py         # 配置与常量
+│   │   └── utils.py          # 共享工具
 │   ├── build_index.py        # 索引构建脚本
 │   ├── gen_fake_msg.py       # 测试数据生成
-│   ├── ingest.py             # 数据导入
 │   └── search_index/         # 预构建的 txtai 索引
 ├── core/
 │   ├── config.py             # 数据库与 API 配置

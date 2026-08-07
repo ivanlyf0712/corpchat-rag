@@ -81,6 +81,75 @@ def update_embedding(row_id: int):
     conn.close()
 
 
+def init_agent_memory_table():
+    """Create agent_memory table if it doesn't exist."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(64) NOT NULL,
+                turn_number INTEGER NOT NULL,
+                user_message TEXT NOT NULL,
+                bot_message TEXT NOT NULL,
+                intent VARCHAR(32),
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_agent_memory_session
+            ON agent_memory(session_id, turn_number)
+        """)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def load_agent_memory(session_id: str, max_turns: int = 10):
+    """Load recent turns for a session from agent_memory."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT turn_number, user_message, bot_message, intent
+            FROM agent_memory
+            WHERE session_id = %s
+            ORDER BY turn_number DESC
+            LIMIT %s
+        """, (session_id, max_turns))
+        rows = cur.fetchall()
+        # Reverse to chronological order
+        return [{"user": r[1], "bot": r[2], "intent": r[3]} for r in reversed(rows)]
+    except Exception:
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
+
+def save_agent_memory(session_id: str, turn_number: int, user_message: str, bot_message: str, intent: str):
+    """Append a turn to agent_memory."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO agent_memory (session_id, turn_number, user_message, bot_message, intent)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (session_id, turn_number, user_message, bot_message, intent))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
 def search_similar(query, vendor_filter=None, top_k=5,
                    date_from=None, date_to=None, amount_min=None, amount_max=None,
                    keyword_filter=None):

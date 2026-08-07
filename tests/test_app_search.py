@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 App-layer tests for tickets 01–04 — verify the four enhancement layers are
-wired through app.py's public search entry point `search_messages_onyx()`.
+wired through app.py's public search entry point `search_messages()`.
 
-Seam: `apps.corpchat.app.search_messages_onyx()` — the function the Streamlit
+Seam: `apps.corpchat.app.search_messages()` — the function the Streamlit
 UI calls. We mock `streamlit` (so app.py can be imported without a running
 server), mock `_load_search_index` (so no real index is needed), and use
 deterministic fakes for QueryExpander / Reranker so no live API or model
@@ -219,7 +219,7 @@ def embeddings(test_index):
 
 @pytest.fixture()
 def app_searcher(monkeypatch, embeddings):
-    """Wire app.search_messages_onyx to a deterministic in-memory index."""
+    """Wire app.search_messages to a deterministic in-memory index."""
     # Replace _load_search_index so no real index is needed
     monkeypatch.setattr(app_module, "_load_search_index", lambda: embeddings)
     return app_module
@@ -229,7 +229,7 @@ def app_searcher(monkeypatch, embeddings):
 def test_app_base_logistics_quotation(monkeypatch, app_searcher, embeddings):
     """app.py search must surface the logistics message (base works)."""
     # Disable all enhancement layers to test the base path
-    results = app_searcher.search_messages_onyx(
+    results = app_searcher.search_messages(
         "物流報價 方案", top_k=5, use_rerank=False, expand=False, graph_expand=0
     )
     assert results, "No results returned"
@@ -241,7 +241,7 @@ def test_app_base_logistics_quotation(monkeypatch, app_searcher, embeddings):
 
 def test_app_base_investment_bond(monkeypatch, app_searcher, embeddings):
     """app.py search must surface the investment message (base works)."""
-    results = app_searcher.search_messages_onyx(
+    results = app_searcher.search_messages(
         "投資美國債券跟藍籌股", top_k=5, use_rerank=False, expand=False, graph_expand=0
     )
     assert results, "No results returned"
@@ -266,7 +266,7 @@ def test_app_expansion_wired(monkeypatch, app_searcher, embeddings):
     monkeypatch.setattr(search_module, "QueryExpander", _fake_expander)
 
     # expand=True must construct the expander
-    app_searcher.search_messages_onyx(
+    app_searcher.search_messages(
         "物流報價 方案", top_k=5, use_rerank=False, expand=True, graph_expand=0
     )
     assert captured.get("constructed"), "QueryExpander was not constructed when expand=True"
@@ -275,10 +275,10 @@ def test_app_expansion_wired(monkeypatch, app_searcher, embeddings):
 def test_app_expansion_improves_or_matches_base(monkeypatch, app_searcher, embeddings):
     """app.py with expand=True must be at least as relevant as expand=False."""
     query = "物流報價 方案"
-    base = app_searcher.search_messages_onyx(
+    base = app_searcher.search_messages(
         query, top_k=5, use_rerank=False, expand=False, graph_expand=0
     )
-    expanded = app_searcher.search_messages_onyx(
+    expanded = app_searcher.search_messages(
         query, top_k=5, use_rerank=False, expand=True, graph_expand=0
     )
     assert base and expanded, "No results returned"
@@ -304,7 +304,7 @@ def test_app_graph_expand_wired(monkeypatch, app_searcher, embeddings):
 
     monkeypatch.setattr(Searcher, "search", _spy_search)
 
-    app_searcher.search_messages_onyx(
+    app_searcher.search_messages(
         "物流報價 方案", top_k=5, use_rerank=False, expand=False, graph_expand=1
     )
     assert captured.get("graph_expand") == 1, (
@@ -326,7 +326,7 @@ def test_app_rerank_wired(monkeypatch, app_searcher, embeddings):
 
     monkeypatch.setattr(search_module, "Reranker", _fake_reranker)
 
-    app_searcher.search_messages_onyx(
+    app_searcher.search_messages(
         "物流報價 方案", top_k=5, use_rerank=True, expand=False, graph_expand=0
     )
     assert captured.get("constructed"), "Reranker was not constructed when use_rerank=True"
@@ -335,10 +335,10 @@ def test_app_rerank_wired(monkeypatch, app_searcher, embeddings):
 def test_app_rerank_improves_or_matches_base(monkeypatch, app_searcher, embeddings):
     """app.py with use_rerank=True must be at least as relevant as use_rerank=False."""
     query = "投資美國債券跟藍籌股"
-    base = app_searcher.search_messages_onyx(
+    base = app_searcher.search_messages(
         query, top_k=5, use_rerank=False, expand=False, graph_expand=0
     )
-    reranked = app_searcher.search_messages_onyx(
+    reranked = app_searcher.search_messages(
         query, top_k=5, use_rerank=True, expand=False, graph_expand=0
     )
     assert base and reranked, "No results returned"
@@ -409,7 +409,7 @@ def test_app_agentic_wired(monkeypatch, app_searcher, embeddings):
 
     monkeypatch.setattr(search_module, "AgenticDecider", _fake_decider)
 
-    app_searcher.search_messages_onyx(
+    app_searcher.search_messages(
         "物流報價 方案", top_k=5, use_rerank=False, expand=False, graph_expand=0,
         agentic=True
     )
@@ -441,7 +441,7 @@ def test_app_agentic_decision_overrides_manual_params(monkeypatch, app_searcher,
     monkeypatch.setattr(Searcher, "search", _spy_search)
 
     # Pass manual params that should be overridden by the agentic decision
-    app_searcher.search_messages_onyx(
+    app_searcher.search_messages(
         "物流報價 方案", top_k=5, use_rerank=True, expand=True, graph_expand=1,
         agentic=True
     )
@@ -474,7 +474,7 @@ def test_app_agentic_defaults_to_false(monkeypatch, app_searcher, embeddings):
     monkeypatch.setattr(Searcher, "search", _spy_search)
 
     # No agentic param → default False → manual hybrid mode, decider NOT called
-    app_searcher.search_messages_onyx(
+    app_searcher.search_messages(
         "物流報價 方案", top_k=5, use_rerank=False, expand=False, graph_expand=0
     )
     assert "called" not in captured, "AgenticDecider should not be called when agentic=False"
@@ -484,7 +484,7 @@ def test_app_agentic_defaults_to_false(monkeypatch, app_searcher, embeddings):
 # ── Full pipeline: all four tickets together ────────────────────
 def test_app_full_pipeline_all_layers(monkeypatch, app_searcher, embeddings):
     """app.py default (expand=True, use_rerank=True, graph_expand=1) must work."""
-    results = app_searcher.search_messages_onyx(
+    results = app_searcher.search_messages(
         "物流報價 方案", top_k=5, use_rerank=True, expand=True, graph_expand=1
     )
     assert results, "No results returned"
@@ -496,7 +496,7 @@ def test_app_full_pipeline_all_layers(monkeypatch, app_searcher, embeddings):
 
 def test_app_label_filter_still_scopes(monkeypatch, app_searcher, embeddings):
     """Label filter must still scope correctly through app.py."""
-    results = app_searcher.search_messages_onyx(
+    results = app_searcher.search_messages(
         "投資", top_k=10, use_rerank=False, expand=False, graph_expand=0,
         label_filter="investment_opportunity"
     )
