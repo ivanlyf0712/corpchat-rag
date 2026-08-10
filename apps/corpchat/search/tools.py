@@ -138,7 +138,6 @@ def _weighted_rrf_fuse(embeddings: txtai.Embeddings,
     graph evidence) to the fusion inputs, mirroring Searcher.search(...,
     graph_parallel=True).
     """
-    from .config import GRAPH_RETRIEVAL_WEIGHT
     from .searcher import Searcher
 
     all_results: List[Tuple[List[Tuple[str, float]], float]] = []
@@ -158,14 +157,11 @@ def _weighted_rrf_fuse(embeddings: txtai.Embeddings,
         all_results.append((result_list, q_weight))
 
     # 图并行检索路 (opt-in): 结构邻居作为独立证据参与融合
-    if graph_parallel and embeddings.graph:
-        try:
-            original_query = queries_with_weights[0][0] if queries_with_weights else ""
-            graph_results = Searcher(embeddings)._graph_path_retrieve(original_query, limit=limit)
-            if graph_results:
-                all_results.append((graph_results, GRAPH_RETRIEVAL_WEIGHT))
-        except Exception as e:
-            logger.warning(f"图并行检索失败 (tool): {e}")
+    if graph_parallel:
+        original_query = queries_with_weights[0][0] if queries_with_weights else ""
+        entry = Searcher(embeddings)._graph_parallel_entry(original_query, limit=limit)
+        if entry is not None:
+            all_results.append(entry)
 
     fused = Searcher._weighted_rrf_fusion(all_results)
     output: List[Dict[str, Any]] = []
@@ -211,7 +207,7 @@ def search_messages(query: str, expand: bool = False, use_rerank: bool = False,
         expand: Whether to run LLM query expansion + RRF fusion (optional).
         use_rerank: Whether to cross-encoder rerank the results (optional).
         graph_parallel: Treat graph traversal as a parallel RRF fusion path
-            (structural neighbors; optional, requires expand).
+            (structural neighbors; works with or without expand).
 
     Returns:
         A formatted string with search results, each containing:
@@ -237,9 +233,13 @@ def search_messages(query: str, expand: bool = False, use_rerank: bool = False,
             _last_msg_meta["expanded_queries"] = [q for q, _ in queries_with_weights if q != query]
             docs = _weighted_rrf_fuse(embeddings, queries_with_weights, limit=10, graph_parallel=graph_parallel)
         else:
-            segmented = _segment(query)
-            raw = embeddings.search(segmented, limit=10)
-            docs = _parse_msg_docs(embeddings, raw)
+            if graph_parallel:
+                # 与 Searcher Path A 一致: 直接结果 + 图路 RRF 融合 (无扩展也可用图路)
+                docs = _weighted_rrf_fuse(embeddings, [(query, 1.0)], limit=10, graph_parallel=True)
+            else:
+                segmented = _segment(query)
+                raw = embeddings.search(segmented, limit=10)
+                docs = _parse_msg_docs(embeddings, raw)
 
         if use_rerank:
             from .reranker import Reranker

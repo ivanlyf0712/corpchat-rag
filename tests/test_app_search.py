@@ -217,6 +217,22 @@ def embeddings(test_index):
     return embeddings
 
 
+class _DeterministicExpander:
+    """No-LLM expander: deterministic expansion for app-seam expansion tests.
+
+    The production QueryExpander calls LiteLLM; unit tests must be
+    network-free. Real expansion quality is covered by the query_expander
+    unit tests and the synthetic benchmark.
+    """
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def expand(self, query, use_cache=True):
+        from apps.corpchat.search.config import LLM_SEMANTIC_QUERY_WEIGHT, ORIGINAL_QUERY_WEIGHT
+        return [(query, ORIGINAL_QUERY_WEIGHT), (f"{query} 詳細說明", LLM_SEMANTIC_QUERY_WEIGHT)]
+
+
 @pytest.fixture()
 def app_searcher(monkeypatch, embeddings):
     """Wire app.search_messages to a deterministic in-memory index."""
@@ -255,13 +271,12 @@ def test_app_base_investment_bond(monkeypatch, app_searcher, embeddings):
 def test_app_expansion_wired(monkeypatch, app_searcher, embeddings):
     """app.py must construct a QueryExpander when expand=True."""
     import apps.corpchat.search as search_module
-    from apps.corpchat.search import QueryExpander
 
     captured = {}
 
     def _fake_expander(*args, **kwargs):
         captured["constructed"] = True
-        return QueryExpander(*args, **kwargs)
+        return _DeterministicExpander(*args, **kwargs)
 
     monkeypatch.setattr(search_module, "QueryExpander", _fake_expander)
 
@@ -274,6 +289,10 @@ def test_app_expansion_wired(monkeypatch, app_searcher, embeddings):
 
 def test_app_expansion_improves_or_matches_base(monkeypatch, app_searcher, embeddings):
     """app.py with expand=True must be at least as relevant as expand=False."""
+    import apps.corpchat.search as search_module
+
+    monkeypatch.setattr(search_module, "QueryExpander", _DeterministicExpander)
+
     query = "物流報價 方案"
     base = app_searcher.search_messages(
         query, top_k=5, use_rerank=False, expand=False, graph_expand=0
@@ -531,6 +550,11 @@ def test_app_search_messages_manual_graph_parallel(monkeypatch, app_searcher, em
 # ── Full pipeline: all four tickets together ────────────────────
 def test_app_full_pipeline_all_layers(monkeypatch, app_searcher, embeddings):
     """app.py default (expand=True, use_rerank=True, graph_expand=1) must work."""
+    import apps.corpchat.search as search_module
+
+    # 确定性扩展 (无真实 LLM 调用), reranker 为真实模型但离线可加载
+    monkeypatch.setattr(search_module, "QueryExpander", _DeterministicExpander)
+
     results = app_searcher.search_messages(
         "物流報價 方案", top_k=5, use_rerank=True, expand=True, graph_expand=1
     )

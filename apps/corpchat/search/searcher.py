@@ -118,13 +118,10 @@ class Searcher:
             all_results.append((result_list, q_weight))
 
         # 图并行检索路 (opt-in): 结构性邻居作为独立信号参与融合
-        if graph_parallel and self.embeddings.graph:
-            try:
-                graph_results = self._graph_path_retrieve(query, limit=limit)
-                if graph_results:
-                    all_results.append((graph_results, GRAPH_RETRIEVAL_WEIGHT))
-            except Exception as e:
-                logger.warning(f"图并行检索失败: {e}")
+        if graph_parallel:
+            entry = self._graph_parallel_entry(query, limit)
+            if entry is not None:
+                all_results.append(entry)
 
         return all_results
 
@@ -269,6 +266,23 @@ class Searcher:
 
         ranked = sorted(neighbor_scores.items(), key=lambda kv: kv[1], reverse=True)
         return ranked[:limit]
+
+    def _graph_parallel_entry(self, query: str, limit: int):
+        """图并行检索路的 RRF 融合条目 (results, GRAPH_RETRIEVAL_WEIGHT)。
+
+        封装: 图存在性检查 + 检索 + 异常兜底。无图 / 空结果 / 失败 → None。
+        供 _retrieve_parallel (Path B)、search() 路径 A、tools._weighted_rrf_fuse
+        复用, 避免三处重复的 try/except + 权重组装。
+        """
+        if not getattr(self.embeddings, "graph", None):
+            return None
+        try:
+            graph_results = self._graph_path_retrieve(query, limit=limit)
+            if graph_results:
+                return (graph_results, GRAPH_RETRIEVAL_WEIGHT)
+        except Exception as e:
+            logger.warning(f"图并行检索失败: {e}")
+        return None
 
     # ── 图扩展 (纯结构, 直接 backend API) ──────────────────────
     def _graph_expand(self, results: List[Dict], max_expand: int = 3,
@@ -538,25 +552,23 @@ class Searcher:
                         output.append(parsed)
 
             # 图并行检索路 (opt-in, Path A): 直接结果与图邻居做 RRF 融合
-            if graph_parallel and self.embeddings.graph:
-                try:
-                    graph_results = self._graph_path_retrieve(query, limit=limit)
-                    if graph_results:
-                        fused = self._weighted_rrf_fusion([
-                            ([(r["id"], r["score"]) for r in output], 1.0),
-                            (graph_results, GRAPH_RETRIEVAL_WEIGHT),
-                        ])
-                        output = []
-                        seen_ids = set()
-                        for doc_id, _ in fused:
-                            if doc_id in seen_ids:
-                                continue
-                            seen_ids.add(doc_id)
-                            doc = self._fetch_one_doc(doc_id)
-                            if doc and _filter(doc):
-                                output.append(doc)
-                except Exception as e:
-                    logger.warning(f"图并行检索失败 (路径 A): {e}")
+            if graph_parallel:
+                entry = self._graph_parallel_entry(query, limit)
+                if entry is not None:
+                    graph_results, _ = entry
+                    fused = self._weighted_rrf_fusion([
+                        ([(r["id"], r["score"]) for r in output], 1.0),
+                        (graph_results, GRAPH_RETRIEVAL_WEIGHT),
+                    ])
+                    output = []
+                    seen_ids = set()
+                    for doc_id, _ in fused:
+                        if doc_id in seen_ids:
+                            continue
+                        seen_ids.add(doc_id)
+                        doc = self._fetch_one_doc(doc_id)
+                        if doc and _filter(doc):
+                            output.append(doc)
 
             if graph_expand > 0 and self.embeddings.graph:
                 output = self._graph_expand(

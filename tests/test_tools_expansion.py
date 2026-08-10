@@ -264,3 +264,23 @@ def test_cross_table_agent_forwards_graph_parallel(monkeypatch):
 
     assert msg_kwargs.get("graph_parallel") is True, f"graph_parallel 未转发: {msg_kwargs}"
 
+
+def test_search_messages_graph_parallel_without_expand_calls_graph_path(monkeypatch):
+    """expand=False + graph_parallel=True 也调用图并行路 (与 Searcher Path A 一致)。
+
+    修复: 之前工具在 expand=False 时静默忽略 graph_parallel, 与 Searcher 不一致。
+    """
+    from apps.corpchat.search.searcher import Searcher
+
+    called = []
+
+    def _fake_entry(self, query, limit):
+        called.append(query)
+        return None  # 无图结果 → 回退直接文档
+
+    monkeypatch.setattr(Searcher, "_graph_parallel_entry", _fake_entry)
+
+    result = search_messages.invoke({"query": "跟誰聊過物流", "graph_parallel": True})
+    assert called == ["跟誰聊過物流"], f"图并行入口应被调用: {called}"
+    assert "【消息搜索结果】" in result, "图路为空时应回退直接搜索"
+
