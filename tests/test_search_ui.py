@@ -408,6 +408,8 @@ def test_config_panel_writes_session_config(monkeypatch):
     # fake selectbox 返回第一项 "简单" → depth=simple → agent_enabled=False
     assert cfg["search"]["depth"] == "simple"
     assert ss["agent_enabled"] is False
+    # multiselect default 用标签, 存回 config 用内部 key (回归 #575)
+    assert cfg["knowledge"]["sources"] == ["messages", "contacts"]
 
 
 def test_citations_appended_when_enabled(monkeypatch):

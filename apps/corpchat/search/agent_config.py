@@ -39,6 +39,24 @@ STYLE_LABELS = {
     "详细": "detailed",
 }
 
+# 数据源 (UI 标签 ↔ 内部 key); multiselect 的 options 与 default 都必须用标签
+SOURCE_LABELS = {
+    "消息": "messages",
+    "联系人": "contacts",
+}
+SOURCE_OPTIONS = list(SOURCE_LABELS.keys())
+
+
+def sources_to_labels(sources) -> list:
+    """内部 key 列表 → 显示标签列表 (multiselect default 用)。"""
+    rev = {v: k for k, v in SOURCE_LABELS.items()}
+    return [rev.get(s, s) for s in (sources or [])]
+
+
+def sources_from_labels(labels) -> list:
+    """显示标签列表 → 内部 key 列表 (存回 config 用)。"""
+    return [SOURCE_LABELS.get(l, l) for l in (labels or [])]
+
 
 def preset_index(preset_key: str) -> int:
     """预设 key → 下拉选项索引 (用于 st.selectbox index=)。"""

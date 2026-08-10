@@ -38,11 +38,14 @@ from apps.corpchat.search import (
 )
 from apps.corpchat.search.agent_config import (
     PRESET_LABELS,
+    SOURCE_OPTIONS,
     STYLE_LABELS,
     apply_preset,
     default_agent_config,
     persona_to_profile_dict,
     preset_index,
+    sources_from_labels,
+    sources_to_labels,
     style_index,
 )
 # ── Shared Process-window rendering helpers (kept out of app.py) ──
@@ -572,10 +575,11 @@ def _render_search_page():
                     help="e.g. quotation_request", disabled=st.session_state.searching)
 
             with st.expander("📚 知識範圍", expanded=False):
-                cfg["knowledge"]["sources"] = st.multiselect(
-                    "數據源", ["消息", "联系人"],
-                    default=cfg["knowledge"].get("sources", ["messages", "contacts"]),
+                source_labels = st.multiselect(
+                    "數據源", SOURCE_OPTIONS,
+                    default=sources_to_labels(cfg["knowledge"].get("sources", ["messages", "contacts"])),
                     disabled=st.session_state.searching)
+                cfg["knowledge"]["sources"] = sources_from_labels(source_labels)
                 cfg["knowledge"]["citations"] = st.checkbox(
                     "引用來源", value=cfg["knowledge"].get("citations", False),
                     help="答案附帶來源", disabled=st.session_state.searching)

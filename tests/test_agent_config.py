@@ -94,6 +94,23 @@ def test_persona_to_profile_dict_scales_to_unit():
     assert d["style"] == "detailed"
 
 
+def test_sources_label_key_roundtrip():
+    """数据源标签↔内部 key 互转; multiselect default 必须 ⊆ options (回归 #575)。"""
+    from apps.corpchat.search.agent_config import (
+        SOURCE_OPTIONS,
+        sources_from_labels,
+        sources_to_labels,
+    )
+
+    labels = sources_to_labels(["messages", "contacts"])
+    assert labels == ["消息", "联系人"]
+    # Streamlit 约束: 所有 default 值必须在 options 中
+    assert all(l in SOURCE_OPTIONS for l in labels), f"default 超出 options: {labels}"
+    assert sources_from_labels(labels) == ["messages", "contacts"]
+    assert sources_to_labels(["messages"]) == ["消息"]
+    assert sources_from_labels(["联系人"]) == ["contacts"]
+
+
 def test_agent_config_persistence(monkeypatch):
     """save/load agent_config round-trip via core.db (mocked connection)."""
     import core.db as db_module
