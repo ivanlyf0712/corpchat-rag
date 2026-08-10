@@ -339,3 +339,49 @@ def test_search_messages_graph_parallel_without_expand_calls_graph_path(monkeypa
     assert called == ["跟誰聊過物流"], f"图并行入口应被调用: {called}"
     assert "【消息搜索结果】" in result, "图路为空时应回退直接搜索"
 
+
+# ═══════════════ Memory graph data source (raw_hits) ═══════════════
+def test_search_messages_meta_includes_raw_hits():
+    """search_messages 的 meta 含 raw_hits (带 metadata), 供记忆图谱使用。"""
+    from apps.corpchat.search.tools import get_last_search_meta
+
+    search_messages.invoke({"query": "合同已签"})
+    meta = get_last_search_meta()
+    assert "raw_hits" in meta, "meta 应暴露 raw_hits"
+    assert meta["raw_hits"], "raw_hits 应被填充"
+    first = meta["raw_hits"][0]
+    assert first.get("metadata", {}).get("customer_name") == "陳志明"
+
+
+def test_cross_table_agent_exposes_raw_hits(monkeypatch):
+    """CrossTableAgent.process 返回 search_messages 的原始结果 (含 metadata)。
+
+    确保 agent 路径 (深度模式) 的记忆图谱也有数据来源。
+    """
+    import types
+    from apps.corpchat.search.cross_table_agent import CrossTableAgent
+
+    def _fake_msg_invoke(payload):
+        return "【消息搜索结果】\n1. [Score: 0.61] 高健銘 (userid: user_1) [Label: old_friend_reconnect]\n   合同已签"
+
+    def _fake_contact_invoke(payload):
+        return ""
+
+    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=_fake_msg_invoke))
+    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=_fake_contact_invoke))
+    monkeypatch.setattr(tools_module, "_last_msg_meta", {
+        "query": "合同已签", "expanded_queries": [], "hit_count": 1, "previews": [],
+        "raw_hits": [{"id": "m1", "text": "合同已签", "score": 0.61,
+                      "metadata": {"customer_name": "高健銘", "company": "DCH",
+                                   "label": "old_friend_reconnect", "open_kfid": "k1"}}],
+    })
+
+    agent = CrossTableAgent(expand=False, use_rerank=False)
+    agent._extract_search_query = lambda q: "合同已签"
+    result = agent.process("帮我查一下合同已签的消息")
+
+    hits = result.get("raw_hits", [])
+    assert len(hits) == 1, f"agent 应暴露 raw_hits: {hits}"
+    assert hits[0]["metadata"]["customer_name"] == "高健銘"
+    assert result.get("success") is True
+

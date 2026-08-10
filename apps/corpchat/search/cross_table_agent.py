@@ -402,6 +402,7 @@ class CrossTableAgent:
                 "output": quick_result,
                 "thoughts": ["Quick response: no tools needed"],
                 "tool_calls": [],
+                "raw_hits": [],
                 "steps": self._steps,
                 "success": True,
                 "fallback": False,
@@ -484,10 +485,17 @@ class CrossTableAgent:
             except Exception:
                 output = self._format_fallback_answer(user_input, msg_result, contact_result)
 
+            # 汇总 search_messages 的原始结果 (含 metadata) — 供记忆图谱使用
+            graph_raw_hits = []
+            for tc in executed_calls:
+                if tc.get("tool") == "search_messages":
+                    graph_raw_hits.extend(tc.get("meta", {}).get("raw_hits", []))
+
             return {
                 "output": output,
                 "thoughts": [f"Agent routed to {len(tool_calls)} tool(s)"],
                 "tool_calls": executed_calls,
+                "raw_hits": graph_raw_hits,
                 "steps": self._steps,
                 "success": True,
                 "fallback": False,
@@ -751,6 +759,12 @@ class CrossTableAgent:
 
         self._add_step("✨", "Answer generation", 0, "Combined results into answer")
 
+        # 汇总 search_messages 的原始结果 (含 metadata) — 供记忆图谱使用
+        fallback_raw_hits = []
+        for tc in tool_calls:
+            if tc.get("tool") == "search_messages":
+                fallback_raw_hits.extend(tc.get("meta", {}).get("raw_hits", []))
+
         return {
             "output": summary,
             "thoughts": [
@@ -758,6 +772,7 @@ class CrossTableAgent:
                 f"Fallback: extracted query='{search_query}', userid='{userid if 'userid' in dir() else 'N/A'}'",
             ],
             "tool_calls": tool_calls,
+            "raw_hits": fallback_raw_hits,
             "steps": self._steps,
             "success": True,
             "fallback": True,

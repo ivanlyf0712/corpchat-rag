@@ -702,14 +702,10 @@ def _render_search_page():
     # ── 统一 agent 配置 (设置面板关闭时仍保留上次值) ──
     cfg = st.session_state.get("agent_config") or default_agent_config()
 
-    # ── 布局: 右侧设置面板由左栏 ⚙️/✖ 开关控制 ──
+    # 提交搜索时自动退出编辑模式 (让聊天区显示处理过程与结果)
+    if pending_turn:
+        st.session_state.settings_open = False
     settings_open = st.session_state.get("settings_open", False)
-    if settings_open:
-        chat_col, ctrl_col = st.columns([3, 1])
-        with ctrl_col:
-            _render_settings_panel(cfg)
-    else:
-        chat_col = st.container()
 
     # ── 派生局部变量 (供下游搜索/agent 使用; 即时生效) ──
     st.session_state.agent_config = cfg
@@ -722,7 +718,13 @@ def _render_search_page():
     agent_enabled = (cfg["search"]["depth"] == "deep")
     st.session_state.agent_enabled = agent_enabled
 
-    with chat_col:
+    # ── 布局: 编辑模式 → 配置面板替代聊天面板 (图谱在底部) ──
+    if settings_open:
+        _render_settings_panel(cfg)
+        st.divider()
+        st.markdown("#### 🕸️ 記憶圖譜")
+        _render_memory_graph(cfg)
+    else:
         # 记忆图谱 (星座视图): 有检索结果时显示在聊天区上方
         _render_memory_graph(cfg)
 
@@ -847,7 +849,7 @@ def _render_search_page():
                         _complete_stage(slot, stage_labels[-1] if stage_labels else "done")
                         status.update(label="Agent complete", state="complete")
                 pending_turn["answer"] = answer
-                pending_turn["raw_hits"] = []
+                pending_turn["raw_hits"] = result.get("raw_hits", []) if 'result' in dir() else []
                 pending_turn["status"] = "done"
                 pending_turn["agent_steps"] = steps
                 pending_turn["agent_fallback"] = result.get("fallback", False) if 'result' in dir() else False

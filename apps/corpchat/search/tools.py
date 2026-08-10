@@ -42,6 +42,7 @@ _last_msg_meta: Dict[str, Any] = {
     "expanded_queries": [],
     "hit_count": 0,
     "previews": [],
+    "raw_hits": [],
 }
 _last_contact_meta: Dict[str, Any] = {
     "query": "",
@@ -264,6 +265,13 @@ def search_messages(query: str, expand: bool = False, use_rerank: bool = False,
             "score": round(float(d.get("score", 0.0)), 4),
         }
         for d in docs[:5]
+    ]
+    # 原始结果 (含 metadata) — 供 Hindsight 记忆图谱等下游使用
+    _last_msg_meta["raw_hits"] = [
+        {"id": d.get("id", ""), "text": (d.get("text", "") or "")[:300],
+         "score": float(d.get("score", 0.0)),
+         "metadata": d.get("metadata", {}) or {}}
+        for d in docs[:10]
     ]
 
     lines = ["【消息搜索结果】"]

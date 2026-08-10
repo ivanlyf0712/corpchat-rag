@@ -195,9 +195,8 @@ def _bind_recording_st(monkeypatch):
     """
     monkeypatch.setitem(sys.modules, "streamlit", _FAKE_ST)
     monkeypatch.setattr(app_module, "st", _FAKE_ST)
-    # 现有测试默认打开设置面板 (渲染配置控件), 与旧布局一致;
-    # 关闭面板的行为由专门的 settings 测试覆盖。
-    _FAKE_ST.session_state["settings_open"] = True
+    # 默认聊天模式 (settings 关闭); 需要配置面板的测试显式 settings_open=True
+    _FAKE_ST.session_state["settings_open"] = False
     yield
     monkeypatch.undo()
 
@@ -274,6 +273,7 @@ def test_no_spurious_interrupted_for_fresh_processing_turn(monkeypatch):
 def test_expanders_not_expanded_when_idle(monkeypatch):
     """When not searching, Enhancement/Filters expanders must be collapsed."""
     from streamlit import session_state as ss
+    ss["settings_open"] = True  # 编辑模式: 渲染配置面板
     ss["chat_history"] = []
     ss["searching"] = False
     monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
@@ -404,6 +404,7 @@ def test_search_query_still_calls_search(monkeypatch):
 def test_config_panel_writes_session_config(monkeypatch):
     """配置代理面板把值写入 agent_config 并派生 agent_enabled (深度→agent)。"""
     from streamlit import session_state as ss
+    ss["settings_open"] = True  # 编辑模式: 渲染配置面板
     ss["chat_history"] = []
     ss["searching"] = False
     monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
@@ -428,6 +429,8 @@ def test_citations_appended_when_enabled(monkeypatch):
 
     cfg = default_agent_config()
     cfg["knowledge"]["citations"] = True
+    cfg["search"]["depth"] = "simple"  # 非 agent 管线 (pending 会关闭设置, 面板不再改写 depth)
+    ss["settings_open"] = True
     ss["agent_config"] = cfg
     ss["chat_history"] = [{"query": "物流報價", "answer": None, "raw_hits": [], "status": "processing"}]
     ss["searching"] = True
@@ -734,4 +737,49 @@ def test_memory_graph_empty_state_no_iframe(monkeypatch):
     app_module._render_search_page()
 
     assert not _recorder.iframes, "empty graph should not render an iframe"
+
+
+def test_editing_mode_replaces_chat_panel(monkeypatch):
+    """编辑模式: 配置面板替代聊天面板 (聊天历史不渲染, 图谱在配置底部)。"""
+    from streamlit import session_state as ss
+    ss["settings_open"] = True
+    ss["chat_history"] = [{"query": "q", "answer": "a", "raw_hits": [], "status": "done"}]
+    ss["searching"] = False
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+    chat_calls = []
+    monkeypatch.setattr(app_module, "_render_chat_history",
+                        lambda h: chat_calls.append(len(h)))
+
+    app_module._render_search_page()
+
+    assert chat_calls == [], f"chat history rendered in editing mode: {chat_calls}"
+    assert any(str(l).startswith("🎛️") for l in _recorder.expander_labels), \
+        "config panel missing in editing mode"
+    # 图谱出现在编辑模式 (配置底部) — 有数据时渲染 iframe
+    assert not _recorder.iframes  # 空 history → 无 iframe, 只提示
+
+
+def test_pending_turn_auto_closes_settings(monkeypatch):
+    """提交搜索 (pending turn) → 自动退出编辑模式, 聊天区处理搜索。"""
+    from streamlit import session_state as ss
+    ss["settings_open"] = True
+    ss["chat_history"] = [{"query": "物流報價", "answer": None, "raw_hits": [], "status": "processing"}]
+    ss["searching"] = True
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+    monkeypatch.setattr(app_module, "_check_llm_available", lambda: False)
+    monkeypatch.setattr(app_module, "generate_answer_litellm", lambda q, c, profile=None: "answer")
+    calls = []
+    monkeypatch.setattr(app_module, "_run_search", lambda *a, **k: calls.append(a[0]) or ([], []))
+    monkeypatch.setattr(app_module, "_search_router",
+                        types.SimpleNamespace(decide=lambda q: {"search": True, "query": q, "raw": ""}))
+    # 非 agent 管线 (depth simple), 走 _run_search
+    cfg = app_module.default_agent_config()
+    cfg["search"]["depth"] = "simple"
+    ss["agent_config"] = cfg
+    ss["agent_enabled"] = False
+
+    app_module._render_search_page()
+
+    assert ss["settings_open"] is False, "pending turn must auto-close settings"
+    assert calls, "search should have run in chat mode"
 
