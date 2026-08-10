@@ -82,6 +82,12 @@ ORIGINAL_QUERY_WEIGHT = 0.5
 LLM_SEMANTIC_QUERY_WEIGHT = 1.3
 LLM_KEYWORD_QUERY_WEIGHT = 1.0
 
+# ── 时序检索 (Hindsight temporal-retrieval component) ───────────
+# 检测到时间窗口时放大检索量, 避免窗口过滤饿死结果 (放大 limit + 后置过滤)。
+TEMPORAL_LIMIT_SCALE = float(os.getenv("TEMPORAL_LIMIT_SCALE", "5.0"))
+# bare "最近/近" 的默认窗口 (天)。
+TEMPORAL_DEFAULT_WINDOW_DAYS = int(os.getenv("TEMPORAL_DEFAULT_WINDOW_DAYS", "7"))
+
 # ── LiteLLM 配置 (密钥必须从环境变量提供, 不硬编码) ──────────────
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
 LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "https://your-litellm-proxy.example.com/")

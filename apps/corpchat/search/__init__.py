@@ -43,6 +43,7 @@ from .searcher import Searcher
 from .agentic import AgenticDecider
 from .litellm_client import LiteLLMClient
 from .router import SearchRouter
+from .temporal import TimeExpressionParser, TimeWindow
 from .tools import CROSS_TABLE_TOOLS, search_messages, search_contacts
 from .cross_table_agent import CrossTableAgent, cross_table_chat, is_cross_table_available
 from .utils import _clean_text_from_enriched, _compute_structural_relationships, _segment
@@ -88,6 +89,8 @@ __all__ = [
     "LiteLLMClient",
     "MAX_SEARCH_LIMIT",
     "SearchRouter",
+    "TimeExpressionParser",
+    "TimeWindow",
     "ORIGINAL_QUERY_WEIGHT",
     "QueryExpander",
     "RRF_K_VALUE",

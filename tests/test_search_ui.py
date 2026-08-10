@@ -157,7 +157,8 @@ def _make_fake_streamlit(recorder: _Recorder, search_impl=None):
 
 # ── Install fake streamlit + import app ─────────────────────────────────────
 _recorder = _Recorder()
-sys.modules["streamlit"] = _make_fake_streamlit(_recorder)
+_FAKE_ST = _make_fake_streamlit(_recorder)
+sys.modules["streamlit"] = _FAKE_ST
 
 # Mock DB so app.py imports cleanly
 import core.db as core_db_module
@@ -177,15 +178,17 @@ from apps.corpchat import app as app_module  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _bind_recording_st(monkeypatch):
-    """Bind the app module's `st` to the live recording fake for every test.
+    """Bind `app_module.st` AND `sys.modules['streamlit']` to this file's fake.
 
-    The app module does `import streamlit as st` at import time, capturing a
-    reference to whatever fake was in sys.modules then. When test_app_search.py
-    and this file both install fakes, app_module.st can point at a stale fake.
-    Rebinding per-test makes the page render through the recording fake, so the
-    session_state the test populates is the one the page actually reads.
+    Other test files (e.g. test_app_search.py) also replace
+    `sys.modules['streamlit']` with their own fakes; whichever imported last wins
+    the global slot, so `app_module.st` can point at a foreign fake with a
+    different session_state and widget behavior. Rebinding both to THIS file's
+    fake (`_FAKE_ST`) for every test keeps reads/writes consistent regardless of
+    cross-file import order.
     """
-    monkeypatch.setattr(app_module, "st", sys.modules["streamlit"])
+    monkeypatch.setitem(sys.modules, "streamlit", _FAKE_ST)
+    monkeypatch.setattr(app_module, "st", _FAKE_ST)
     yield
     monkeypatch.undo()
 
@@ -200,6 +203,32 @@ def _fresh_session(query: str):
     # in app.py, so opt out explicitly for deterministic routing.
     ss["agent_enabled"] = False
     return ss
+
+
+@pytest.fixture(autouse=True)
+def _stub_agent_loading(monkeypatch):
+    """Don't load the real production index in UI-routing tests.
+
+    `_render_search_page` builds `st.session_state.agent` via `load_agent()`,
+    which loads the production txtai index — heavy, and under the full suite
+    exhausts MPS GPU memory (RuntimeError: MPS backend out of memory), making
+    later tests order/timing dependent. These tests target UI routing, not
+    retrieval: a stub agent that classifies intent (rules-only, no search, no
+    LLM) preserves the routing behavior while removing the production-index and
+    GPU-memory dependency.
+    """
+    import apps.corpchat.agent as agent_module
+
+    def _stub_agent():
+        return types.SimpleNamespace(
+            session_id="ui-test-session",
+            # 规则纯分类 (_rule_classify): 无网络、无 LLM、无索引依赖
+            process=lambda query, **kw: (app_module._intent_classifier._rule_classify(query) or "search", "", []),
+        )
+
+    monkeypatch.setattr(agent_module, "load_agent", lambda *a, **k: _stub_agent())
+    monkeypatch.setattr(agent_module, "Agent", lambda *a, **k: _stub_agent())
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -350,6 +379,12 @@ def test_search_query_still_calls_search(monkeypatch):
     monkeypatch.setattr(app_module, "_check_llm_available", lambda: False)
     monkeypatch.setattr(app_module, "generate_answer_litellm", lambda q, c: "")
     monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+    # 确定性: 屏蔽真实 LLM 路由调用。该测试验证的是"搜索查询必须到达
+    # _run_search", 不应依赖外部 LLM 网络的即时响应 (search:true/false)。
+    monkeypatch.setattr(
+        app_module, "_search_router",
+        types.SimpleNamespace(decide=lambda q: {"search": True, "query": q, "raw": ""}),
+    )
 
     app_module._render_search_page()
 
