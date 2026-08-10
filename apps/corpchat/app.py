@@ -454,10 +454,10 @@ _CONSTELLATION_TPL = """<div id="cg" style="width:100%;height:__HEIGHT__px;backg
     var p = pos(ev);
     for (var i = P.length - 1; i >= 0; i--) {
       var d = Math.hypot(p.x - P[i].x, p.y - P[i].y);
-      if (d < 22) { drag = P[i]; drag.fx = p.x; drag.fy = p.y; ev.preventDefault(); return; }
+      if (d < 22) { drag = P[i]; drag.fx = p.x; drag.fy = p.y; restart(); ev.preventDefault(); return; }
     }
   });
-  window.addEventListener('mousemove', function(ev) { if (drag) { var p = pos(ev); drag.fx = p.x; drag.fy = p.y; } });
+  window.addEventListener('mousemove', function(ev) { if (drag) { var p = pos(ev); drag.fx = p.x; drag.fy = p.y; restart(); } });
   window.addEventListener('mouseup', function() { drag = null; });
   svg.addEventListener('mousemove', function(ev) {
     var p = pos(ev), hit = null;
@@ -465,10 +465,13 @@ _CONSTELLATION_TPL = """<div id="cg" style="width:100%;height:__HEIGHT__px;backg
     if (hit) { tip.style.display = 'block'; tip.style.left = (p.x + 12) + 'px'; tip.style.top = (p.y + 12) + 'px'; tip.textContent = NODES[hit.i].label; }
     else { tip.style.display = 'none'; }
   });
+  var frame = 0, still = 0, running = true;
   function tick() {
+    frame++;
+    var energy = 0;
     for (var a = 0; a < P.length; a++) for (var b = a + 1; b < P.length; b++) {
       var A = P[a], B = P[b], dx = B.x - A.x, dy = B.y - A.y, d2 = dx*dx + dy*dy + 1, d = Math.sqrt(d2);
-      var f = 14000 / d2;
+      var f = 4000 / d2;
       A.vx -= dx/d*f; A.vy -= dy/d*f; B.vx += dx/d*f; B.vy += dy/d*f;
     }
     EDGES.forEach(function(e) {
@@ -477,14 +480,18 @@ _CONSTELLATION_TPL = """<div id="cg" style="width:100%;height:__HEIGHT__px;backg
       var dx = B.x - A.x, dy = B.y - A.y, d = Math.sqrt(dx*dx + dy*dy + 1), f = (d - 110) * 0.015;
       A.vx += dx/d*f; A.vy += dy/d*f; B.vx -= dx/d*f; B.vy -= dy/d*f;
     });
+    var MAXSPEED = 1.5;
     for (var i = 0; i < P.length; i++) {
       var p = P[i];
       if (drag === p) { p.x = p.fx; p.y = p.fy; p.vx = 0; p.vy = 0; }
       else {
-        p.vx = (p.vx + (W/2 - p.x)*0.0015) * 0.85; p.vy = (p.vy + (H/2 - p.y)*0.0015) * 0.85;
+        p.vx = (p.vx + (W/2 - p.x)*0.0005) * 0.75; p.vy = (p.vy + (H/2 - p.y)*0.0005) * 0.75;
+        p.vx = Math.max(-MAXSPEED, Math.min(MAXSPEED, p.vx));
+        p.vy = Math.max(-MAXSPEED, Math.min(MAXSPEED, p.vy));
         p.x += p.vx; p.y += p.vy;
         if (p.x < 10) p.x = 10; if (p.x > W - 10) p.x = W - 10;
         if (p.y < 10) p.y = 10; if (p.y > H - 10) p.y = H - 10;
+        energy += p.vx*p.vx + p.vy*p.vy;
       }
     }
     for (var e = 0; e < EDGES.length; e++) {
@@ -499,7 +506,16 @@ _CONSTELLATION_TPL = """<div id="cg" style="width:100%;height:__HEIGHT__px;backg
       circles[i].setAttribute('cx', p.x); circles[i].setAttribute('cy', p.y);
       labels[i].setAttribute('x', p.x); labels[i].setAttribute('y', p.y - 10);
     }
+    // 动画预算: 收敛 (动能连续低) 或达到帧数上限后停止, 释放 CPU (不再 requestAnimationFrame)
+    if (drag) { still = 0; }
+    else if (energy < 4) { still++; }
+    else { still = 0; }
+    if (still >= 6 || frame > 160) { running = false; return; }
     requestAnimationFrame(tick);
+  }
+  // 拖拽时唤醒已停止的动画
+  function restart() {
+    if (!running) { running = true; frame = 0; still = 0; requestAnimationFrame(tick); }
   }
   tick();
 })();
