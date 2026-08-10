@@ -81,7 +81,9 @@ class _LiteLLMWrapper(BaseChatModel):
 
         # Contact-detail questions → search_contacts
         contact_kws = ["邮箱", "郵箱", "email", "电话", "電話", "phone", "公司", "职位", "職位",
-                       "联系方式", "聯繫方式", "userid", "who is", "who are", "是谁", "是誰"]
+                       "联系方式", "聯繫方式", "userid", "who is", "who are", "是谁", "是誰",
+                       "contact", "contacts", "联系人", "聯絡人", "名字", "姓名", "name",
+                       "male", "female", "男生", "女生", "先生", "女士"]
         # Message questions → search_messages
         message_kws = ["消息", "说了", "說了", "说", "說", "聊", "对话", "對話", "聊天",
                        "spoke", "talked", "said", "sent", "message", "conversation",

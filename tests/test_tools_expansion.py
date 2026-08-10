@@ -304,6 +304,22 @@ def test_cross_table_agent_contacts_gated_by_sources(monkeypatch):
     assert "contact" not in calls, f"sources 排除 contacts 仍调用了 search_contacts: {calls}"
 
 
+def test_contact_name_query_routes_to_contacts():
+    """'姓名/联系人' 类查询应路由到 search_contacts, 而非默认回退 search_messages。"""
+    from apps.corpchat.search.cross_table_agent import _LiteLLMWrapper
+
+    w = _LiteLLMWrapper(api_base="", api_key="", model="test")
+    queries = [
+        "Give me one example of male's name in the contact",
+        "给我一个男生的姓名",
+        "联系人的名字",
+    ]
+    for q in queries:
+        names = [c["name"] for c in w._decide_tool_calls(q)]
+        assert "search_contacts" in names, f"{q} 应路由到 contacts: {names}"
+        assert "search_messages" not in names, f"{q} 不应路由到 messages: {names}"
+
+
 def test_search_messages_graph_parallel_without_expand_calls_graph_path(monkeypatch):
     """expand=False + graph_parallel=True 也调用图并行路 (与 Searcher Path A 一致)。
 
