@@ -191,3 +191,38 @@ class TestGreetingHandling:
                             lambda u: classified.append(u) or "search")
         assert agent._quick_respond("李雅婷的邮箱是什么？") is None
         assert classified == [], "search-hint query must not hit LLM classify"
+
+
+def test_extract_search_query_strips_english_noise():
+    """英文口语噪声 (try again / who is / please find) 应从查询中剥离。"""
+    agent = CrossTableAgent()
+    assert agent._extract_search_query("try again. Who is 李雅婷?") == "李雅婷"
+    assert agent._extract_search_query("please find 陳志明 email") == "陳志明 email"
+    assert agent._extract_search_query("search for messages containing a link please") == "messages containing a link"
+
+
+def test_contact_only_query_uses_deterministic_answer(monkeypatch):
+    """纯联系人查询走确定性格式化, 不调用 LLM 总结 (避免小模型幻觉)。"""
+    import types
+    from apps.corpchat.search import tools as tools_module
+
+    def _fake_contact_invoke(payload):
+        return ("【联系人搜索结果】\n1. [Score: 0.9] 李雅婷 (userid: user_李雅婷_dliang)\n"
+                "   Email: hsin-ihu@example.org\n   Company: 富邦金控\n"
+                "   Phone: (925)853-4192x832\n   Job Title: 人力資源主管")
+
+    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=_fake_contact_invoke))
+    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=lambda p: ""))
+    monkeypatch.setattr(tools_module, "search_messages_where", types.SimpleNamespace(invoke=lambda p: ""))
+    monkeypatch.setattr(tools_module, "_last_contact_meta",
+                        {"query": "", "hit_count": 1, "previews": []})
+
+    agent = CrossTableAgent(expand=False, use_rerank=False)
+    called = []
+    agent._llm_summarize = lambda q, msg, contact: called.append(1) or "LLM ANSWER"
+
+    result = agent.process("Who is 李雅婷?")
+
+    assert called == [], "contact-only query must not call LLM summarize"
+    assert "李雅婷" in result["output"] and "hsin-ihu@example.org" in result["output"]
+    assert result.get("success") is True

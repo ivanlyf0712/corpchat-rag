@@ -498,11 +498,17 @@ class CrossTableAgent:
 
             self._last_tool_calls = executed_calls
 
-            # ── Step 3: Synthesize answer with LLM ──
+            # ── Step 3: Synthesize answer ──
             _stage("✨", "generating answer...")
             self._add_step("✨", "Answer generation", 0, "Combining results")
+            # 联系人结构化查询 → 确定性格式化 (小模型易幻觉, 不冒 LLM 总结风险)
+            only_contacts = bool(executed_calls) and all(
+                tc.get("tool") == "search_contacts" for tc in executed_calls)
             try:
-                output = self._llm_summarize(user_input, msg_result, contact_result)
+                if only_contacts:
+                    output = self._format_fallback_answer(user_input, msg_result, contact_result)
+                else:
+                    output = self._llm_summarize(user_input, msg_result, contact_result)
             except Exception:
                 output = self._format_fallback_answer(user_input, msg_result, contact_result)
 
@@ -835,6 +841,14 @@ class CrossTableAgent:
                        "帮我", "请", "请问", "查一下", "找一下", "搜索一下"]:
             q = q.replace(filler, "")
 
+        # Strip English conversational noise / instructions (e.g. "try again. Who is 李雅婷")
+        for pat in (r"^try again[\.!\s]*", r"^please[,\s]+", r"^find (me |out )?",
+                    r"^(who is|who are|what is|what are|tell me about|give me|show me)\s+",
+                    r"^i (want|need) to (know|find|search)\s+",
+                    r"^can you (tell me|find|search|look up)\s+",
+                    r"^do you know\s+", r"^search for\s+", r"^look (for|up)\s+"):
+            q = re.sub(pat, "", q, flags=re.IGNORECASE)
+        q = re.sub(r"\s*(please|thanks|thank you)[.!]*\s*$", "", q, flags=re.IGNORECASE)
         # Remove trailing punctuation
         q = q.strip("'\"'?？，,。.!！")
         return q.strip() or user_input[:30]
@@ -921,7 +935,10 @@ class CrossTableAgent:
 
         # If the LLM says it found nothing but we have search results, show the raw results
         no_info_markers = ["没有找到", "未找到", "没有相关", "no information", "no relevant",
-                           "not found", "无法找到", "找不到", "没有关于"]
+                           "not found", "无法找到", "找不到", "没有关于",
+                           "do not include", "does not include", "cannot provide",
+                           "not available", "not in the results", "no contact",
+                           "no person", "无法提供", "没有这个人", "结果中不包含"]
         has_results = bool(msg_result.strip() or contact_result.strip())
         if has_results and any(marker in result for marker in no_info_markers):
             logger.info("LLM reported no info but search returned results — showing raw results")
