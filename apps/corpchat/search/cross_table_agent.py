@@ -135,6 +135,18 @@ class _LiteLLMWrapper(BaseChatModel):
         # Cross-table: "who did X spoke to" / "发'X'消息的人" → both
         cross_table = any(t in q for t in _CROSS_TABLE_TERMS)
 
+        # 结构化过滤查询 (含链接/URL/标签等精确条件) → SQL 精确检索 (不走语义向量)
+        struct_kws = ("link", "url", "http", "www", "網址", "網址", "链接", "連結", "网站", "網站")
+        msg_ctx = ("message" in q or "messages" in q or "msg" in q or "消息" in q or "訊息" in q
+                   or "sent" in q or "contain" in q or "含" in q or "有" in q
+                   or "找" in q or "search" in q or "查" in q or "发" in q or "發" in q)
+        if any(kw in q for kw in struct_kws) and msg_ctx:
+            return [{
+                "name": "search_messages_where",
+                "args": {"condition": user_input},
+                "id": "call_struct_1",
+            }]
+
         # Greeting / system questions → no tools.
         # Checked AFTER search keywords so an explicit search request wins
         # over a courtesy greeting word embedded in it.
@@ -302,13 +314,13 @@ class CrossTableAgent:
         if not _LANGCHAIN_AVAILABLE:
             raise RuntimeError("LangChain is not installed. Run: pip install langchain langchain-community")
 
-        from .tools import search_messages, search_contacts
+        from .tools import search_messages, search_contacts, search_messages_where
 
         model = self._get_llm()
 
         self._agent = create_react_agent(
             model,
-            tools=[search_messages, search_contacts],
+            tools=[search_messages, search_contacts, search_messages_where],
             prompt=SYSTEM_PROMPT,
         )
 
@@ -410,7 +422,7 @@ class CrossTableAgent:
 
         # ── Step 2: Manual ReAct loop (reliable, no LangGraph dependency) ──
         try:
-            from .tools import search_messages, search_contacts
+            from .tools import search_messages, search_contacts, search_messages_where
 
             # Decide which tools to call based on the query
             wrapper = _LiteLLMWrapper(
@@ -424,6 +436,7 @@ class CrossTableAgent:
                 tool_calls = [
                     tc for tc in tool_calls
                     if (tc["name"] == "search_messages" and "messages" in self.sources)
+                    or (tc["name"] == "search_messages_where" and "messages" in self.sources)
                     or (tc["name"] == "search_contacts" and "contacts" in self.sources)
                 ]
             self._add_step("🧠", "Agent routing", 0, f"Decided {len(tool_calls)} tool call(s)")
@@ -456,6 +469,14 @@ class CrossTableAgent:
                     self._add_step("🔍", "search_messages", int((_t1 - _t0) * 1000), f"Query: '{actual_query}'")
                     from .tools import get_last_search_meta
                     meta = get_last_search_meta()
+                elif name == "search_messages_where":
+                    _stage("🗄️", f"using search_messages_where... condition: {search_query}")
+                    msg_result = search_messages_where.invoke({"condition": search_query})
+                    _t1 = _time.perf_counter()
+                    self._add_step("🗄️", "search_messages_where", int((_t1 - _t0) * 1000),
+                                   f"Condition: '{search_query}'")
+                    from .tools import get_last_search_meta
+                    meta = get_last_search_meta()
                 elif name == "search_contacts":
                     _stage("👤", f"using search_contacts... query: {search_query}")
                     contact_result = search_contacts.invoke({"query": search_query})
@@ -469,7 +490,7 @@ class CrossTableAgent:
                 executed_calls.append({
                     "tool": name,
                     "tool_input": actual_query,
-                    "observation": (msg_result if name == "search_messages" else contact_result)[:200],
+                    "observation": (msg_result if name in ("search_messages", "search_messages_where") else contact_result)[:200],
                     "meta": meta,
                 })
 
@@ -485,10 +506,10 @@ class CrossTableAgent:
             except Exception:
                 output = self._format_fallback_answer(user_input, msg_result, contact_result)
 
-            # 汇总 search_messages 的原始结果 (含 metadata) — 供记忆图谱使用
+            # 汇总 search_messages / search_messages_where 的原始结果 (含 metadata) — 供记忆图谱使用
             graph_raw_hits = []
             for tc in executed_calls:
-                if tc.get("tool") == "search_messages":
+                if tc.get("tool") in ("search_messages", "search_messages_where"):
                     graph_raw_hits.extend(tc.get("meta", {}).get("raw_hits", []))
 
             return {
@@ -868,7 +889,9 @@ class CrossTableAgent:
                 f"Message search results:\n{msg_result}\n\n"
                 f"Contact search results:\n{contact_result}\n\n"
                 "Based on the above information, give a concise and accurate answer in English. "
-                "If information is insufficient, say so honestly."
+                "If information is insufficient, say so honestly. "
+                "Only use the provided results — never invent message content, URLs, "
+                "sender names, or any other detail that is not in the results."
             )
             system = "You are a corporate chat search assistant. Answer in English, concise and accurate."
         else:
@@ -877,6 +900,7 @@ class CrossTableAgent:
                 f"消息搜索结果：\n{msg_result}\n\n"
                 f"联系人搜索结果：\n{contact_result}\n\n"
                 "请根据以上信息，给出一个简洁准确的答案。如果信息不足，请如实告知。"
+                "只能使用给定的搜索结果——严禁编造消息内容、URL、发送者姓名等结果中没有的信息。"
             )
             system = "你是一个企业聊天记录搜索助手。用中文回答，简洁准确。"
 

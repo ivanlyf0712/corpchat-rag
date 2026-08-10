@@ -21,7 +21,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from apps.corpchat.search import tools as tools_module
-from apps.corpchat.search.tools import search_messages, search_contacts
+from apps.corpchat.search.tools import search_messages, search_contacts, search_messages_where
 
 
 # ── Fake txtai embeddings ─────────────────────────────────────────
@@ -383,5 +383,124 @@ def test_cross_table_agent_exposes_raw_hits(monkeypatch):
     hits = result.get("raw_hits", [])
     assert len(hits) == 1, f"agent 应暴露 raw_hits: {hits}"
     assert hits[0]["metadata"]["customer_name"] == "高健銘"
+    assert result.get("success") is True
+
+
+# ═══════════════ SQL 结构化检索 (search_messages_where) ═══════════════
+def test_structured_link_query_routes_to_search_messages_where():
+    """含 link/URL 的消息查询 → SQL 结构化检索, 不走语义向量。"""
+    from apps.corpchat.search.cross_table_agent import _LiteLLMWrapper
+    w = _LiteLLMWrapper(api_base="", api_key="", model="test")
+
+    for q in ("search for messages containing a link please",
+              "search for messages containing a URL please",
+              "找一下含網址的消息"):
+        names = [c["name"] for c in w._decide_tool_calls(q)]
+        assert "search_messages_where" in names, f"{q!r} should route to structured tool: {names}"
+
+    # 非结构化查询不受影响
+    assert w._decide_tool_calls("李雅婷的邮箱是什么")[0]["name"] == "search_contacts"
+
+
+def test_search_messages_where_returns_db_rows(monkeypatch):
+    """结构化工具经 SQL 返回真实匹配消息 (含链接), 不依赖语义检索。"""
+    import core.db
+
+    class _Cur:
+        description = [("msgid",), ("external_userid",), ("send_time",), ("label",), ("content",)]
+        def execute(self, sql):
+            pass
+        def fetchall(self):
+            return [
+                ("m1", "user_高健銘_i-chunli", "2026-01-01T10:00:00", "old_friend_reconnect",
+                 "看看这个链接 https://tinyurl.com/2p9demo"),
+            ]
+        def close(self):
+            pass
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+        def close(self):
+            pass
+
+    monkeypatch.setattr(core.db, "get_db_connection", lambda: _Conn())
+
+    res = search_messages_where.invoke({"condition": "messages containing a link"})
+
+    assert "https://tinyurl.com/2p9demo" in res, f"链接消息未返回: {res}"
+    meta = tools_module.get_last_search_meta()
+    assert meta["raw_hits"] and meta["raw_hits"][0]["text"].startswith("看看这个链接")
+
+
+def test_validate_sql_blocks_unsafe_statements():
+    """text-to-SQL 校验器拒绝非 SELECT / 危险语句, 并附加 LIMIT。"""
+    from apps.corpchat.search.tools import _validate_sql
+
+    assert _validate_sql("DROP TABLE messages") is None
+    assert _validate_sql("INSERT INTO messages VALUES (1)") is None
+    assert _validate_sql("DELETE FROM messages") is None
+    assert _validate_sql("SELECT content FROM messages WHERE label='fraud'") is not None
+    ok = _validate_sql("SELECT content FROM messages WHERE content ILIKE '%http%'")
+    assert ok is not None and ok.lower().endswith("limit 20")
+
+
+def test_search_messages_where_falls_back_to_index_scan_when_db_down(monkeypatch):
+    """DB 不可用时回退到 txtai 索引扫描 (确定性正则匹配 URL)。"""
+    import core.db
+
+    def _down():
+        raise ConnectionError("db down")
+
+    monkeypatch.setattr(core.db, "get_db_connection", _down)
+
+    class _UrlEmbeddings:
+        database = _FakeDB
+        def count(self):
+            return 3
+        def search(self, q, limit=10, weights=None):
+            return [
+                {"id": "m1", "text": "看看 https://tinyurl.com/2p9demo", "score": 0.0},
+                {"id": "m2", "text": "好的 收到 谢谢", "score": 0.0},
+                {"id": "m3", "text": "www.example.com 请查收", "score": 0.0},
+            ]
+
+    monkeypatch.setattr(tools_module, "_load_messages_index", lambda: _UrlEmbeddings())
+
+    res = search_messages_where.invoke({"condition": "messages containing a link"})
+
+    assert "https://tinyurl.com/2p9demo" in res, f"索引扫描未返回链接消息: {res}"
+    assert "www.example.com" in res
+    meta = tools_module.get_last_search_meta()
+    assert meta["hit_count"] == 2
+
+
+def test_cross_table_agent_uses_structured_tool_for_link_query(monkeypatch):
+    """Agent 对含链接查询调用 search_messages_where 并暴露 raw_hits。"""
+    import types
+    from apps.corpchat.search.cross_table_agent import CrossTableAgent
+
+    calls = []
+
+    def _fake_where_invoke(payload):
+        calls.append(payload.get("condition"))
+        return ("【结构化匹配】\n1. [Match] user_高健銘_i-chunli (userid: user_高健銘_i-chunli) "
+                "[Label: old_friend_reconnect] [2026-01-01T10:00:00]\n   看看 https://tinyurl.com/2p9demo")
+
+    monkeypatch.setattr(tools_module, "search_messages_where", types.SimpleNamespace(invoke=_fake_where_invoke))
+    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=lambda p: ""))
+    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=lambda p: ""))
+    monkeypatch.setattr(tools_module, "_last_msg_meta", {
+        "query": "", "expanded_queries": [], "hit_count": 1, "previews": [],
+        "raw_hits": [{"id": "m1", "text": "https://tinyurl.com/2p9demo", "score": 0.0,
+                      "metadata": {"customer_name": "高健銘", "label": "old_friend_reconnect"}}],
+    })
+
+    agent = CrossTableAgent(expand=False, use_rerank=False)
+    agent._llm_summarize = lambda q, msg, contact: "含链接的消息: 高健銘"
+    result = agent.process("search for messages containing a link please")
+
+    assert calls, "structured tool 未被调用"
+    assert result.get("raw_hits"), "结构化结果应暴露 raw_hits 供图谱使用"
     assert result.get("success") is True
 

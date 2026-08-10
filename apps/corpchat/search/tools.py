@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import txtai
@@ -349,5 +350,181 @@ def search_contacts(query: str) -> str:
     return "\n".join(lines)
 
 
+# ── SQL 结构化检索 (messages 精确过滤, 不走向量语义) ──────────────
+_SQL_TABLES = ("messages", "contacts")
+
+
+def _run_messages_sql(sql: str) -> List[Dict[str, Any]]:
+    """Execute a read-only SELECT on the messages table; returns rows as dicts."""
+    from core.db import get_db_connection
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _validate_sql(sql: str) -> Optional[str]:
+    """Validate an LLM-generated SELECT: single SELECT, allowed tables, read-only.
+
+    Returns the cleaned SQL (with a LIMIT guard) or None when unsafe.
+    """
+    if not sql:
+        return None
+    s = sql.strip().rstrip(";").strip()
+    low = s.lower()
+    if not low.startswith("select"):
+        return None
+    for bad in ("insert", "update", "delete", "drop", "alter", "grant",
+                "create", "truncate", "copy", "--", "/*"):
+        if bad in low:
+            return None
+    tables = re.findall(r"\bfrom\s+(\w+)", low)
+    if not tables or any(t not in _SQL_TABLES for t in tables):
+        return None
+    if "limit" not in low:
+        s += " LIMIT 20"
+    return s
+
+
+def _condition_to_sql(condition: str) -> Optional[str]:
+    """规则映射自然语言条件 → SQL (确定性, 不依赖 LLM)。"""
+    c = condition.lower()
+    url_words = ("link", "url", "http", "www", "網址", "網址", "链接", "連結", "网站", "網站", "网络", "網路")
+    if any(w in c for w in url_words):
+        return (
+            "SELECT msgid, external_userid, send_time, label, content "
+            "FROM messages "
+            "WHERE content ILIKE '%http://%' OR content ILIKE '%https://%' "
+            "OR content ILIKE '%www.%' OR content ~ '(https?://|www\\.)[^ ]*' "
+            "ORDER BY send_time DESC LIMIT 20"
+        )
+    m = re.search(r"(?:label|标签|標籤)\s*[:=]?\s*['\"]?([a-z_]+)", c)
+    if m:
+        return (
+            "SELECT msgid, external_userid, send_time, label, content "
+            f"FROM messages WHERE label = '{m.group(1)}' "
+            "ORDER BY send_time DESC LIMIT 20"
+        )
+    return None
+
+
+def _llm_condition_to_sql(condition: str) -> Optional[str]:
+    """Text-to-SQL 兜底: LLM 生成 messages 表的 SELECT, 经严格校验后执行。"""
+    try:
+        from .litellm_client import LiteLLMClient
+        client = LiteLLMClient()
+        result = client.chat(
+            [
+                {"role": "system", "content": (
+                    "You convert a natural-language filter into a PostgreSQL SELECT. "
+                    "Table: messages(msgid, open_kfid, external_userid, send_time, origin, "
+                    "servicer_userid, msgtype, content, label). "
+                    "Reply with ONLY the SQL statement. Read-only SELECT only, no semicolons."
+                )},
+                {"role": "user", "content": condition},
+            ],
+            temperature=0.0, max_tokens=160, timeout=8,
+        )
+        return _validate_sql(result or "")
+    except Exception as e:
+        logger.warning(f"Text-to-SQL failed: {e}")
+        return None
+
+
+def _scan_messages_index(condition: str) -> List[Dict[str, Any]]:
+    """DB 不可用时的回退: 扫描 txtai 消息索引, 按正则精确匹配 (URL/链接)。
+
+    与语义向量检索不同, 这是对全量索引的确定性模式匹配。
+    """
+    pattern = None
+    c = condition.lower()
+    url_words = ("link", "url", "http", "www", "網址", "網址", "链接", "連結", "网站", "網站")
+    if any(w in c for w in url_words):
+        pattern = re.compile(r"(https?://|www\.)", re.I)
+    if pattern is None:
+        return []
+
+    embeddings = _load_messages_index()
+    try:
+        docs = embeddings.search("*", limit=embeddings.count() + 1)
+    except Exception:
+        docs = embeddings.search("", limit=embeddings.count() + 1)
+
+    rows = []
+    for d in docs:
+        text = str(d.get("text", "") or "")
+        if pattern.search(text):
+            meta = _fetch_doc_metadata(embeddings, d.get("id", "")) if d.get("id") else {}
+            rows.append({
+                "msgid": d.get("id", ""),
+                "external_userid": (meta.get("external_userid") or meta.get("customer_name") or ""),
+                "send_time": meta.get("send_time", ""),
+                "label": meta.get("label", ""),
+                "content": text,
+            })
+    return rows
+
+
+@tool
+def search_messages_where(condition: str) -> str:
+    """按结构化条件精确检索消息 (SQL 过滤, 非语义向量)。
+
+    Use this when the user asks for messages that match an exact property:
+    contains a link/URL (含链接/網址), a specific label, a specific sender,
+    or any condition expressible as a SQL filter. Returns matching message
+    rows (sender, label, time, content) — grounded in the DB, no guessing.
+
+    Args:
+        condition: 自然语言条件, e.g. "messages containing a link",
+                   "label = fraud", "含網址的消息"
+    """
+    sql = _condition_to_sql(condition)
+    if sql is None:
+        sql = _llm_condition_to_sql(condition)
+    if sql is None:
+        return "无法理解该结构化条件。"
+
+    global _last_msg_meta
+    _last_msg_meta = {"query": condition, "expanded_queries": [], "hit_count": 0, "previews": [], "raw_hits": []}
+
+    try:
+        rows = _run_messages_sql(sql)
+    except Exception as e:
+        logger.warning(f"Structured messages SQL failed ({e}) — falling back to index scan")
+        rows = _scan_messages_index(condition)
+
+    if not rows:
+        return "No matching messages found."
+
+    _last_msg_meta["hit_count"] = len(rows)
+    _last_msg_meta["previews"] = [
+        {"text": (r.get("content", "") or "")[:200],
+         "sender": r.get("external_userid", "?"),
+         "score": 0.0}
+        for r in rows[:5]
+    ]
+    _last_msg_meta["raw_hits"] = [
+        {"id": str(r.get("msgid", "")), "text": (r.get("content", "") or "")[:300],
+         "score": 0.0,
+         "metadata": {"customer_name": r.get("external_userid", ""), "label": r.get("label", ""),
+                      "send_time": r.get("send_time")}}
+        for r in rows[:10]
+    ]
+
+    lines = ["【结构化匹配】"]
+    for i, r in enumerate(rows, 1):
+        lines.append(
+            f"\n{i}. [Match] {r.get('external_userid', '?')} "
+            f"(userid: {r.get('external_userid', '?')}) "
+            f"[Label: {r.get('label', '-')}] [{r.get('send_time', '')}]\n"
+            f"   {r.get('content', '')}"
+        )
+    return "\n".join(lines)
+
+
 # ── Export tool list ─────────────────────────────────────────────
-CROSS_TABLE_TOOLS = [search_messages, search_contacts]
+CROSS_TABLE_TOOLS = [search_messages, search_contacts, search_messages_where]

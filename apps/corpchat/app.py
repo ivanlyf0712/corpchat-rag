@@ -344,7 +344,9 @@ def generate_answer_litellm(query: str, context: str, profile: Optional[Any] = N
     system_content = (
         "You are a helpful assistant answering questions based on retrieved chat messages. "
         "Answer concisely in the same language as the query. "
-        "If the context doesn't contain the answer, say so."
+        "If the context doesn't contain the answer, say so. "
+        "Only use the provided context — never invent message content, URLs, sender names, "
+        "or any detail not present in it."
     )
     if profile is not None:
         system_content = profile.build_system_prompt(system_content)
