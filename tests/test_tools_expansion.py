@@ -227,3 +227,40 @@ class TestAgentForwarding:
         assert msg_kwargs.get("expand") is False
         assert msg_kwargs.get("use_rerank") is False
 
+
+# ═══════════════ Ticket 02: graph_parallel threading (tool) ═══════════════
+def test_search_messages_accepts_and_forwards_graph_parallel(monkeypatch):
+    """search_messages 接受 graph_parallel 并透传给 RRF 融合路径 (expand 分支)。"""
+    calls = []
+
+    def _recording_fuse(embeddings, queries_with_weights, limit=10, **kw):
+        calls.append(kw)
+        return []
+
+    monkeypatch.setattr(tools_module, "_weighted_rrf_fuse", _recording_fuse)
+    search_messages.invoke({"query": "跟誰聊過物流", "expand": True, "graph_parallel": True})
+
+    assert calls, "expand 分支应调用 _weighted_rrf_fuse"
+    assert calls[0].get("graph_parallel") is True, f"graph_parallel 未透传: {calls[0]}"
+
+
+def test_cross_table_agent_forwards_graph_parallel(monkeypatch):
+    """CrossTableAgent(graph_parallel=True) → search_messages 带 graph_parallel=True。"""
+    import types
+    from apps.corpchat.search.cross_table_agent import CrossTableAgent
+
+    msg_kwargs = {}
+
+    def _fake_msg_invoke(payload):
+        msg_kwargs.update(payload)
+        return "【消息搜索结果】\n1. [Score: 0.61] 陳志明 (userid: user_1) [Label: sample_request]\n   合同已签"
+
+    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=_fake_msg_invoke))
+    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=lambda p: ""))
+
+    agent = CrossTableAgent(graph_parallel=True)
+    agent._extract_search_query = lambda q: "跟誰聊過物流"
+    agent.process("跟誰聊過物流")
+
+    assert msg_kwargs.get("graph_parallel") is True, f"graph_parallel 未转发: {msg_kwargs}"
+

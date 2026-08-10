@@ -481,6 +481,53 @@ def test_app_agentic_defaults_to_false(monkeypatch, app_searcher, embeddings):
     assert captured.get("mode") == "hybrid", f"mode should be hybrid by default: {captured.get('mode')}"
 
 
+# ── Ticket 02: graph_parallel wired through app.py ───────────────
+def test_app_agentic_graph_parallel_from_decision(monkeypatch, app_searcher, embeddings):
+    """agentic=True 时 graph_parallel 由 AgenticDecider 决策提供并传到 Searcher.search。"""
+    import apps.corpchat.search as search_module
+    from apps.corpchat.search import Searcher
+
+    captured = {}
+
+    class _FakeDecider:
+        def decide(self, query):
+            return {"mode": "hybrid", "expand": False, "graph_expand": 0,
+                    "use_rerank": False, "graph_parallel": True}
+
+    monkeypatch.setattr(search_module, "AgenticDecider", _FakeDecider)
+
+    original_search = Searcher.search
+
+    def _spy_search(self, *args, **kwargs):
+        captured["graph_parallel"] = kwargs.get("graph_parallel")
+        return original_search(self, *args, **kwargs)
+
+    monkeypatch.setattr(Searcher, "search", _spy_search)
+
+    app_searcher.search_messages("跟誰聊過物流", top_k=5, agentic=True)
+    assert captured.get("graph_parallel") is True, f"graph_parallel 未从决策透传: {captured}"
+
+
+def test_app_search_messages_manual_graph_parallel(monkeypatch, app_searcher, embeddings):
+    """非 agentic 路径: 手动 graph_parallel=True 传到 Searcher.search。"""
+    from apps.corpchat.search import Searcher
+
+    captured = {}
+    original_search = Searcher.search
+
+    def _spy_search(self, *args, **kwargs):
+        captured["graph_parallel"] = kwargs.get("graph_parallel")
+        return original_search(self, *args, **kwargs)
+
+    monkeypatch.setattr(Searcher, "search", _spy_search)
+
+    app_searcher.search_messages(
+        "跟誰聊過物流", top_k=5, use_rerank=False, expand=False, graph_expand=0,
+        graph_parallel=True
+    )
+    assert captured.get("graph_parallel") is True
+
+
 # ── Full pipeline: all four tickets together ────────────────────
 def test_app_full_pipeline_all_layers(monkeypatch, app_searcher, embeddings):
     """app.py default (expand=True, use_rerank=True, graph_expand=1) must work."""

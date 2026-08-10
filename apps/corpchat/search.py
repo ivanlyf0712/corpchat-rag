@@ -73,6 +73,17 @@ SYNTHETIC_TEST_QUERIES = [
      "description": "高健銘假冒老同學發送釣魚連結"},
     {"query": "投資方案高回報", "expected_labels": ["investment_opportunity"],
      "description": "羅思婷推銷高回報投資方案"},
+    # ── Hindsight 优势查询类: 时序 / 关系 / 组合 ──
+    {"query": "最近的投資方案高回報", "expected_labels": ["investment_opportunity"],
+     "description": "时序: 时间窗口内召回投資方案", "graph_parallel": False},
+    {"query": "上個月的詐騙連結", "expected_labels": ["old_friend_reconnect"],
+     "description": "时序: 上月窗口内召回詐騙消息", "graph_parallel": False},
+    {"query": "發'合同已簽'消息的人還聊了什麼", "expected_labels": ["contract_renewal"],
+     "description": "关系: 结构邻居经图并行路召回", "graph_parallel": True},
+    {"query": "跟陳志明聊過物流報價的對話", "expected_labels": ["product_inquiry"],
+     "description": "关系: 对话上下文经图并行路召回", "graph_parallel": True},
+    {"query": "上個月跟陳志明聊的物流報價", "expected_labels": ["product_inquiry"],
+     "description": "组合: 时序+关系 多路融合", "graph_parallel": True},
 ]
 
 
@@ -298,7 +309,10 @@ def synthetic_benchmark_cmd(index_path):
         rows = []
         hit_count = 0
         for test in SYNTHETIC_TEST_QUERIES:
-            results = searcher.search(test["query"], mode="hybrid", limit=10, expand=False)
+            results = searcher.search(
+                test["query"], mode="hybrid", limit=10, expand=False,
+                graph_parallel=test.get("graph_parallel", False),
+            )
             found_labels = set()
             for r in results:
                 lbl = r.get("metadata", {}).get("label", "")

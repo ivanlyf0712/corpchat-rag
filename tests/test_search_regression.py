@@ -136,3 +136,145 @@ def test_label_filter_scopes_correctly(searcher):
     assert all(l == "investment_opportunity" for l in labels), (
         f"Label filter leaked other labels: {labels}"
     )
+
+
+# ── Ticket: temporal & relationship recall (Hindsight advantage) ──
+# 永久回归门新增: 时序窗口被尊重 / 结构邻居被召回 / 组合查询不破坏内容。
+# 确定性图+时间索引: 会话按 conv_idx 偏移 send_time, 结构边来自真实会话关系。
+from datetime import datetime, timedelta  # noqa: E402
+
+try:  # noqa: E402 — 同 test_search_graph.py 的 GrandCypher workaround
+    from txtai.graph.networkx import NetworkX
+    if not hasattr(NetworkX, "original_isquery"):
+        NetworkX.original_isquery = NetworkX.isquery
+        NetworkX.isquery = lambda self, queries: False
+except Exception:
+    pass
+
+
+def _ts(days_ago: int) -> str:
+    return (datetime.now() - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _compute_structural_relationships(docs):
+    """Five structural edge descriptors for tuple-format docs (per test_search_graph)."""
+    metas = {}
+    for doc_id, _text, tags_json in docs:
+        metas[doc_id] = json.loads(tags_json)
+    relationships = {doc_id: [] for doc_id, _, _ in docs}
+    doc_ids = list(metas.keys())
+    for i, a_id in enumerate(doc_ids):
+        a = metas[a_id]
+        for b_id in doc_ids[i + 1:]:
+            b = metas[b_id]
+            rels = set()
+            if a.get("open_kfid") and a["open_kfid"] == b.get("open_kfid"):
+                rels.add("same_conversation")
+            if a.get("open_kfid") and a["open_kfid"] == b.get("open_kfid"):
+                if a["external_userid"] == b.get("servicer_userid") or \
+                   b["external_userid"] == a.get("servicer_userid"):
+                    rels.add("sender_receiver")
+            if a.get("external_userid") and a["external_userid"] == b.get("external_userid"):
+                rels.add("same_sender")
+            if a.get("company") and a["company"] == b.get("company"):
+                rels.add("same_company")
+            if a.get("label") and a["label"] == b.get("label"):
+                rels.add("same_label")
+            for rel in rels:
+                relationships[a_id].append({"id": b_id, "relation": rel})
+                relationships[b_id].append({"id": a_id, "relation": rel})
+    return relationships
+
+
+def _build_graph_time_index(tmp_path):
+    """图+时间索引: send_time 按会话偏移 (conv_idx*3 天前), 结构图启用。"""
+    docs = []
+    for conv_idx, conv in enumerate(CONVERSATION_TEMPLATES):
+        label = conv["label"]
+        init_name = CONTACTS[conv["initiator"]]["name"]
+        resp_name = CONTACTS[conv["responder"]]["name"]
+        open_kfid = f"kf_{label}_{conv_idx}"
+        for i, (speaker_idx, text) in enumerate(conv["turns"]):
+            speaker_name = CONTACTS[speaker_idx]["name"]
+            doc_id = f"{label}_{i}"
+            title = f"{speaker_name} ({label})"
+            match_text = f"{title}\n---\n{text}"
+            tags = {
+                "label": label,
+                "customer_name": speaker_name,
+                "company": CONTACTS[speaker_idx]["company"],
+                "send_time": _ts(conv_idx * 3),
+                "external_userid": speaker_name,
+                "servicer_userid": resp_name if speaker_name == init_name else init_name,
+                "msgid": doc_id,
+                "origin": "3" if speaker_name == init_name else "5",
+                "chunk_index": i,
+                "open_kfid": open_kfid,
+            }
+            docs.append((doc_id, match_text, json.dumps(tags, default=str)))
+
+    relationships = _compute_structural_relationships(docs)
+    graph_docs = [
+        (doc_id, {"text": text, "relationships": relationships.get(doc_id, [])}, tags_json)
+        for doc_id, text, tags_json in docs
+    ]
+    embeddings = txtai.Embeddings(
+        {"path": EMBEDDING_MODEL, "content": True, "objects": True, "hybrid": True,
+         "scoring": {"method": "bm25"}, "graph": True, "columns": {"relationships": "relationships"}}
+    )
+    embeddings.index(graph_docs)
+    idx_path = os.path.join(tmp_path, "graph_time_idx")
+    embeddings.save(idx_path)
+    return idx_path
+
+
+@pytest.fixture(scope="module")
+def graph_time_searcher(tmp_path_factory):
+    idx = _build_graph_time_index(tmp_path_factory.mktemp("graph_time"))
+    embeddings = txtai.Embeddings()
+    embeddings.load(idx)
+    return Searcher(embeddings)
+
+
+def test_regression_temporal_window_respected(graph_time_searcher):
+    """纯时序查询 '最近的消息' 只返回 7 天窗口内的文档。"""
+    window_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    results = graph_time_searcher.search(
+        "最近的消息", mode="hybrid", limit=10, expand=False, use_rerank=False
+    )
+    assert results, "纯时序查询应返回窗口内文档"
+    for r in results:
+        assert str(r["metadata"]["send_time"])[:10] >= window_start, (
+            f"窗口外文档被召回: {r['id']}"
+        )
+
+
+def test_regression_relationship_neighbor_recalled(graph_time_searcher):
+    """关系查询 + graph_parallel=True → 引入直接搜索没有的结构邻居。"""
+    query = "物流報價 方案"
+    off = graph_time_searcher.search(
+        query, mode="hybrid", limit=10, expand=False, graph_expand=0, use_rerank=False
+    )
+    on = graph_time_searcher.search(
+        query, mode="hybrid", limit=10, expand=False, graph_expand=0, use_rerank=False,
+        graph_parallel=True,
+    )
+    assert off and on
+    off_ids = {r["id"] for r in off}
+    new_ids = [r["id"] for r in on if r["id"] not in off_ids]
+    assert new_ids, "graph_parallel 应引入结构邻居"
+
+
+def test_regression_combined_time_relationship(graph_time_searcher):
+    """组合查询 '最近的物流報價': 时间窗口被尊重且内容不被破坏。"""
+    window_start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    results = graph_time_searcher.search(
+        "最近的物流報價", mode="hybrid", limit=10, expand=False, use_rerank=False
+    )
+    assert results, "组合查询应返回窗口内结果"
+    for r in results:
+        assert str(r["metadata"]["send_time"])[:10] >= window_start, (
+            f"窗口外文档被召回: {r['id']}"
+        )
+    labels = {r["metadata"]["label"] for r in results}
+    assert "product_inquiry" in labels, "窗口内物流对话应被召回"

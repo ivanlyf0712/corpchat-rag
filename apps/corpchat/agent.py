@@ -378,6 +378,7 @@ class Agent:
         graph_expand: int = 1,
         label_filter: Optional[str] = None,
         search_mode: str = "hybrid",
+        graph_parallel: bool = False,
     ) -> Tuple[str, str, List[Dict]]:
         """
         Process a user query through the agentic pipeline.
@@ -396,6 +397,8 @@ class Agent:
             graph_expand: Number of graph expansion hops.
             label_filter: Optional label to filter results by.
             search_mode: "hybrid", "keyword", or "semantic".
+            graph_parallel: Treat graph traversal as a parallel RRF fusion path
+                (Hindsight graph-traversal evidence; defaults off).
 
         Returns:
             Tuple of (intent, response_text, search_results)
@@ -448,6 +451,7 @@ class Agent:
                 graph_expand=graph_expand,
                 label_filter=label_filter,
                 use_rerank=use_rerank,
+                graph_parallel=graph_parallel,
             )
 
             # Build response from results

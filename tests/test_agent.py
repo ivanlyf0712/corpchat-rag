@@ -348,3 +348,36 @@ class TestAgentPerformance:
         agent_llm_down.process("Hi")
         elapsed = (time.perf_counter() - t0) * 1000
         assert elapsed < 10.0, f"Greeting too slow: {elapsed:.1f}ms"
+
+
+# ═══════════════ Ticket 02: graph_parallel threading ═══════════════
+def test_agent_passes_graph_parallel_to_searcher(classifier_llm_down):
+    """Agent.process 把 graph_parallel 透传给 Searcher.search。"""
+    calls = []
+
+    class _RecordingSearcher:
+        def search(self, query, **kwargs):
+            calls.append(kwargs)
+            return []
+
+    agent = Agent(searcher=_RecordingSearcher(), classifier=classifier_llm_down)
+    intent, answer, results = agent.process(
+        "跟誰聊過物流", top_k=3, graph_parallel=True, expand=False, use_rerank=False
+    )
+    assert intent == INTENT_SEARCH
+    assert calls, "searcher.search 应被调用"
+    assert calls[0].get("graph_parallel") is True, f"graph_parallel 未透传: {calls[0]}"
+
+
+def test_agent_graph_parallel_defaults_false(classifier_llm_down):
+    """未传 graph_parallel 时默认 False, 现有调用行为不变。"""
+    calls = []
+
+    class _RecordingSearcher:
+        def search(self, query, **kwargs):
+            calls.append(kwargs)
+            return []
+
+    agent = Agent(searcher=_RecordingSearcher(), classifier=classifier_llm_down)
+    agent.process("物流報價 方案", top_k=3, expand=False, use_rerank=False)
+    assert calls and calls[0].get("graph_parallel") is False

@@ -127,12 +127,18 @@ def _parse_msg_docs(embeddings: txtai.Embeddings, raw: List[Any]) -> List[Dict[s
 
 def _weighted_rrf_fuse(embeddings: txtai.Embeddings,
                        queries_with_weights: List[Tuple[str, float]],
-                       limit: int = 10) -> List[Dict[str, Any]]:
+                       limit: int = 10,
+                       graph_parallel: bool = False) -> List[Dict[str, Any]]:
     """Search each expanded query and merge via weighted RRF fusion.
 
     Mirrors the non-agent Searcher pipeline so an agentic tool call is
     treated as an individual full search.
+
+    graph_parallel: append the structural graph-traversal path (Hindsight
+    graph evidence) to the fusion inputs, mirroring Searcher.search(...,
+    graph_parallel=True).
     """
+    from .config import GRAPH_RETRIEVAL_WEIGHT
     from .searcher import Searcher
 
     all_results: List[Tuple[List[Tuple[str, float]], float]] = []
@@ -150,6 +156,16 @@ def _weighted_rrf_fuse(embeddings: txtai.Embeddings,
             if doc_id:
                 result_list.append((doc_id, score))
         all_results.append((result_list, q_weight))
+
+    # 图并行检索路 (opt-in): 结构邻居作为独立证据参与融合
+    if graph_parallel and embeddings.graph:
+        try:
+            original_query = queries_with_weights[0][0] if queries_with_weights else ""
+            graph_results = Searcher(embeddings)._graph_path_retrieve(original_query, limit=limit)
+            if graph_results:
+                all_results.append((graph_results, GRAPH_RETRIEVAL_WEIGHT))
+        except Exception as e:
+            logger.warning(f"图并行检索失败 (tool): {e}")
 
     fused = Searcher._weighted_rrf_fusion(all_results)
     output: List[Dict[str, Any]] = []
@@ -182,7 +198,8 @@ def _weighted_rrf_fuse(embeddings: txtai.Embeddings,
 
 
 @tool
-def search_messages(query: str, expand: bool = False, use_rerank: bool = False) -> str:
+def search_messages(query: str, expand: bool = False, use_rerank: bool = False,
+                    graph_parallel: bool = False) -> str:
     """搜索内部聊天消息，返回消息内容和发送者信息。
 
     Use this when the user asks about conversations, chat records, messages,
@@ -193,6 +210,8 @@ def search_messages(query: str, expand: bool = False, use_rerank: bool = False) 
         query: The search query (e.g. "合同已签", "诈骗链接", "物流报价")
         expand: Whether to run LLM query expansion + RRF fusion (optional).
         use_rerank: Whether to cross-encoder rerank the results (optional).
+        graph_parallel: Treat graph traversal as a parallel RRF fusion path
+            (structural neighbors; optional, requires expand).
 
     Returns:
         A formatted string with search results, each containing:
@@ -216,7 +235,7 @@ def search_messages(query: str, expand: bool = False, use_rerank: bool = False) 
                 logger.warning(f"Query expansion failed: {e}")
                 queries_with_weights = [(query, 1.0)]
             _last_msg_meta["expanded_queries"] = [q for q, _ in queries_with_weights if q != query]
-            docs = _weighted_rrf_fuse(embeddings, queries_with_weights, limit=10)
+            docs = _weighted_rrf_fuse(embeddings, queries_with_weights, limit=10, graph_parallel=graph_parallel)
         else:
             segmented = _segment(query)
             raw = embeddings.search(segmented, limit=10)

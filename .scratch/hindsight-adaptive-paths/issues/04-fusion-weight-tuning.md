@@ -17,3 +17,4 @@
 - Spec: `.scratch/hindsight-adaptive-paths/spec.md`
 - Depends on: 03 (benchmark coverage is the measurement prerequisite).
 - Config knobs: `GRAPH_RETRIEVAL_WEIGHT`, `GRAPH_PARALLEL_HOP_DISCOUNT`, `GRAPH_PARALLEL_SEED_LIMIT` (config.py).
+- **Sweep result (2026-08-07)**: swept `GRAPH_RETRIEVAL_WEIGHT` ∈ {0.3, 0.5, 0.8, 1.0} against the deterministic graph+time regression index for query `物流報價 方案`. Top-5 composition was identical at every weight — the direct match (`product_inquiry_0`) stayed in top-5 and 6 structural neighbors surfaced in top-10 in all cases. In this synthetic corpus the graph-path results overlap heavily with content results, so the weight has no material effect. **Default kept at 0.8** (validated by the regression gate); the knob remains configurable for real corpora where graph-only neighbors are more orthogonal.

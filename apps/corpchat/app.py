@@ -250,6 +250,7 @@ def search_messages(
     graph_expand: int = 1,
     label_filter: str = "",
     agentic: bool = False,
+    graph_parallel: bool = False,
 ):
     """Backward-compatible search seam used by tests and any external caller.
 
@@ -265,6 +266,7 @@ def search_messages(
         expand = decision.get("expand", expand)
         graph_expand = decision.get("graph_expand", graph_expand)
         use_rerank = decision.get("use_rerank", use_rerank)
+        graph_parallel = decision.get("graph_parallel", graph_parallel)
     else:
         mode = "hybrid"
 
@@ -282,6 +284,7 @@ def search_messages(
             expand=expand,
             graph_expand=graph_expand,
             label_filter=label_filter or None,
+            graph_parallel=graph_parallel,
         )
         return _docs_to_tuples(raw_results)
     except Exception as e:
@@ -313,7 +316,8 @@ def _load_search_index():
     return load_index(DEFAULT_INDEX_PATH)
 
 @st.cache_data(ttl=30)
-def _run_search(query: str, top_k: int, use_rerank: bool, expand: bool, graph_expand: int, agentic: bool, label_filter: str):
+def _run_search(query: str, top_k: int, use_rerank: bool, expand: bool, graph_expand: int,
+                agentic: bool, label_filter: str, graph_parallel: bool = False):
     if not query.strip():
         return [], []
     try:
@@ -328,6 +332,7 @@ def _run_search(query: str, top_k: int, use_rerank: bool, expand: bool, graph_ex
             expand=expand,
             graph_expand=graph_expand,
             label_filter=label_filter or None,
+            graph_parallel=graph_parallel,
         )
         return _docs_to_tuples(raw_results), raw_results
     except Exception as e:
@@ -393,6 +398,11 @@ def _render_search_page():
             use_rerank = st.checkbox("Reranker", value=True, help="Cross-encoder reranking", disabled=st.session_state.searching)
             expand = st.checkbox("LLM expansion", value=True, help="Expand query via LiteLLM", disabled=st.session_state.searching)
             graph_expand = st.slider("Graph hops", min_value=0, max_value=3, value=1, disabled=st.session_state.searching)
+            graph_parallel = st.checkbox(
+                "Graph path", value=False,
+                help="Graph traversal as a fusion path (relationship queries)",
+                disabled=st.session_state.searching,
+            )
             # Persist agent toggle across reruns (default: activated)
             if "agent_enabled" not in st.session_state:
                 st.session_state.agent_enabled = True
@@ -508,6 +518,7 @@ def _render_search_page():
                                 model=LITELLM_MODEL,
                                 expand=expand,
                                 use_rerank=use_rerank,
+                                graph_parallel=graph_parallel,
                             )
                             result = ct_agent.process(query, on_stage=_on_stage)
                             answer = result["output"]
@@ -543,6 +554,7 @@ def _render_search_page():
                 graph_expand=graph_expand,
                 label_filter=label_filter or None,
                 search_mode="hybrid",
+                graph_parallel=graph_parallel,
             )
             raw_hits = search_results if isinstance(search_results, list) else []
 
@@ -615,7 +627,8 @@ def _render_search_page():
                     # Stage 2: Hybrid search
                     _animate_stage(slot, "2/6 hybrid search (BM25 + vector)...")
                     results, raw_hits = _run_search(
-                        query, top_k, use_rerank, expand, graph_expand, False, label_filter
+                        query, top_k, use_rerank, expand, graph_expand, False, label_filter,
+                        graph_parallel,
                     )
                     _complete_stage(slot, "2/6 hybrid search...")
                     st.write(f"   Found {len(raw_hits)} hits")

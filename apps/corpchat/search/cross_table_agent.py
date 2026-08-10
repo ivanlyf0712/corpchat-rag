@@ -219,12 +219,14 @@ class CrossTableAgent:
         model: str = LITELLM_MODEL,
         expand: bool = False,
         use_rerank: bool = False,
+        graph_parallel: bool = False,
     ):
         self.api_base = api_base or LITELLM_BASE_URL
         self.api_key = api_key or LITELLM_API_KEY
         self.model = model
         self.expand = expand
         self.use_rerank = use_rerank
+        self.graph_parallel = graph_parallel
         self._agent: Optional[Any] = None
         self._last_thoughts: List[str] = []
         self._last_tool_calls: List[Dict[str, Any]] = []
@@ -378,12 +380,14 @@ class CrossTableAgent:
                 if name == "search_messages":
                     _stage("🔍", f"using search_messages... query: {search_query}")
                     msg_result = search_messages.invoke(
-                        {"query": search_query, "expand": self.expand, "use_rerank": self.use_rerank}
+                        {"query": search_query, "expand": self.expand, "use_rerank": self.use_rerank,
+                         "graph_parallel": self.graph_parallel}
                     )
                     # If no results with the extracted query, retry with the original query
                     if self._is_empty_result(msg_result) and search_query != user_input:
                         msg_result = search_messages.invoke(
-                            {"query": user_input, "expand": self.expand, "use_rerank": self.use_rerank}
+                            {"query": user_input, "expand": self.expand, "use_rerank": self.use_rerank,
+                             "graph_parallel": self.graph_parallel}
                         )
                         actual_query = user_input
                     _t1 = _time.perf_counter()
@@ -503,7 +507,8 @@ class CrossTableAgent:
             # First: search messages with the extracted query
             _t0 = _time.perf_counter()
             msg_result = search_messages.invoke(
-                {"query": search_query, "expand": self.expand, "use_rerank": self.use_rerank}
+                {"query": search_query, "expand": self.expand, "use_rerank": self.use_rerank,
+                 "graph_parallel": self.graph_parallel}
             )
             _t1 = _time.perf_counter()
             self._add_step("🔍", "search_messages", int((_t1 - _t0) * 1000), f"Query: '{search_query}'")

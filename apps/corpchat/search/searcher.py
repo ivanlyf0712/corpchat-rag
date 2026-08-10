@@ -537,6 +537,27 @@ class Searcher:
                     if _filter(parsed):
                         output.append(parsed)
 
+            # 图并行检索路 (opt-in, Path A): 直接结果与图邻居做 RRF 融合
+            if graph_parallel and self.embeddings.graph:
+                try:
+                    graph_results = self._graph_path_retrieve(query, limit=limit)
+                    if graph_results:
+                        fused = self._weighted_rrf_fusion([
+                            ([(r["id"], r["score"]) for r in output], 1.0),
+                            (graph_results, GRAPH_RETRIEVAL_WEIGHT),
+                        ])
+                        output = []
+                        seen_ids = set()
+                        for doc_id, _ in fused:
+                            if doc_id in seen_ids:
+                                continue
+                            seen_ids.add(doc_id)
+                            doc = self._fetch_one_doc(doc_id)
+                            if doc and _filter(doc):
+                                output.append(doc)
+                except Exception as e:
+                    logger.warning(f"图并行检索失败 (路径 A): {e}")
+
             if graph_expand > 0 and self.embeddings.graph:
                 output = self._graph_expand(
                     output[:limit], max_expand=3, limit=limit * 2,

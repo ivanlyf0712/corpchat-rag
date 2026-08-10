@@ -224,3 +224,19 @@ def test_graph_parallel_query_consistency_gate(searcher):
         assert query_scores.get(neighbor_id, 0.0) > 0, (
             f"{neighbor_id} 未通过 query-consistency gate (relevance=0)"
         )
+
+
+def test_graph_parallel_works_without_expansion(searcher):
+    """graph_parallel=True + expand=False (Path A) 引入直接搜索没有的结构邻居。
+
+    关系查询不需要 LLM 扩展也能用图并行路 —— 基准 (expand=False) 因此可测。
+    """
+    query = "物流報價 方案"
+    off = searcher.search(query, mode="hybrid", limit=10, expand=False, graph_expand=0,
+                          use_rerank=False, graph_parallel=False)
+    on = searcher.search(query, mode="hybrid", limit=10, expand=False, graph_expand=0,
+                         use_rerank=False, graph_parallel=True)
+    assert off and on
+    off_ids = {r["id"] for r in off}
+    new_ids = [r["id"] for r in on if r["id"] not in off_ids]
+    assert new_ids, "graph_parallel (Path A) 应引入直接搜索没有的结构邻居"
