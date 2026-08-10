@@ -10,7 +10,7 @@ Agent 的个性与行为目前分散在多个不连贯的 UI 控件（Enhancemen
 
 1. **CARA 人格缺少预设模式** — 只有三个滑杆，没有"审计助手 / 客服助手 / 研究助理"一键预设。
 2. **搜索策略无会话持久化** — expand/rerank/graph/top-k 等参数仅存于 UI 控件，刷新即丢；persona 虽已持久化但体系割裂。
-3. **知识范围与输出控制缺失** — 无数据源筛选（消息/联系人/合同）、无引用来源、回答长度仅隐式存在（persona style）。
+3. **知识范围与输出控制缺失** — 无数据源筛选（消息/联系人）、无引用来源、回答长度仅隐式存在（persona style）。
 4. **无记忆图谱** — Hindsight 的"星座视图"（实体关系图）完全缺失；现有 `visualize_graph.py` 是 CLI（chunk 级结构图），未接入 UI，更无实体级记忆图。
 
 目标: 提供一个统一的"🎛️ 配置代理"面板（CARA 人格 / 搜索策略 / 知识范围与输出 / 记忆图谱四区块），所有配置即时生效、会话级持久化，并集成 Hindsight 风格的可交互实体记忆图谱。
@@ -28,7 +28,7 @@ Agent 的个性与行为目前分散在多个不连贯的 UI 控件（Enhancemen
 1. As a user, I want a single "配置代理" panel with CARA / search / knowledge / graph sections, so that I tune the agent in one place.
 2. As a user, I want one-click CARA presets (审计助手 / 客服助手 / 研究助理), so that common personas are applied instantly.
 3. As a user, I want my config to survive page reloads and new sessions, so that I don't re-tune every time.
-4. As a user, I want to pick data sources (消息 / 联系人 / 合同), so that the agent only searches what I choose.
+4. As a user, I want to pick data sources (消息 / 联系人), so that the agent only searches what I choose.
 5. As a user, I want citations on/off, so that answers can show their sources.
 6. As a user, I want answer length (简洁 / 标准 / 详细), so that output verbosity matches my need.
 7. As a user, I want an interactive entity constellation (people/companies/labels/keywords + mention/association/reference links), so that I can see the memory landscape.
@@ -78,7 +78,7 @@ Agent 的个性与行为目前分散在多个不连贯的 UI 控件（Enhancemen
  │   ├─ 重排序   st.checkbox  → use_rerank
  │   ├─ (既有) Graph hops / Graph path / Top-k / Label filter
  ├─ 📚 知识范围
- │   ├─ 数据源 st.multiselect(消息/联系人/合同)
+ │   ├─ 数据源 st.multiselect(消息/联系人)
  │   └─ 引用来源 st.checkbox
  └─ 🕸️ 记忆图谱
      └─ streamlit_agraph (节点=实体, 边=关系, 点击→搜索)
@@ -130,7 +130,7 @@ def _format_citations(results, max_sources=3) -> str:
 
 - **实体抽取（`apps/corpchat/search/memory_graph.py`）**：从消息元数据（`customer_name/company/label/open_kfid`）+ `agent_memory` 文本：
   - 节点类型: `person` / `company` / `label` / `keyword`（关键词用 jieba 抽取 top-N）
-  - 边类型: `mention`(实体↔消息)、`association`(人↔公司、人↔标签、同会话人↔人)、`reference`(消息↔标签/合同)
+  - 边类型: `mention`(实体↔消息)、`association`(人↔公司、人↔标签、同会话人↔人)、`reference`(消息↔标签)
 - **持久化**：`memory_graph` 表（`session_id PK, nodes JSON, edges JSON, updated_at`）。
 - **渲染**：`streamlit-agraph`（新增依赖）——节点大小=连接密度、颜色=类型/关系、支持点击回调。
 - **联动**：
@@ -206,7 +206,7 @@ with st.expander("🎛️ 配置代理", expanded=True):
 
 ## Out of Scope
 
-- **合同索引重建**：数据源"合同"依赖一个可检索的 contracts 索引（当前仅有 `invoices` DB 表 + `search_similar`）——新索引/工具列为独立 ticket 依赖。
+- **合同数据源**：产品决策 — 合同不出本期范围；数据源多选仅含 消息 / 联系人。
 - **图谱实体抽取的 LLM 增强**：POC 用规则 + jieba；LLM 实体抽取是后续优化。
 - **配置版本化 / 多用户配置中心**：单 session 持久化足够。
 - **CARA 检索侧加权**（高怀疑度提升图/时序权重）——仍为未来扩展。
@@ -216,6 +216,6 @@ with st.expander("🎛️ 配置代理", expanded=True):
 
 - 背景：`docs/hindsight-integration-plan.md`；已有组件（persona 层、adaptive paths、temporal、graph-parallel）是此面板的"后端"，面板只是统一它们 + 新增预设/引用/图谱。
 - 依赖新增：`streamlit-agraph`（图谱交互）——需加入 `requirements.txt`。
-- 合同数据源为最大外部依赖（需要 contracts 索引/tool），建议在 ticket 02 中先做"门控 + 消息/联系人"，合同作为可插拔第三源。
+- 数据源多选仅含 消息 / 联系人（合同按产品决策排除）。
 
 ```
