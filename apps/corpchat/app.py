@@ -128,6 +128,19 @@ h1 { border-bottom: 2px solid #30363d; padding-bottom: 0.3em; }
 """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════ sidebar navigation ════════════════════════════════════
+def _render_sidebar_settings_toggle():
+    """左栏底部 ⚙️/✖ 开关: 点击切换右侧设置面板。
+
+    打开 → 右栏变为设置; 再点 (✖) → 退出设置, 聊天占满宽度。
+    状态存于 session_state.settings_open (跨 rerun 保留)。
+    """
+    settings_open = st.session_state.get("settings_open", False)
+    label = "✖ 退出设置" if settings_open else "⚙️ 设置"
+    if st.button(label, key="settings_toggle", use_container_width=True):
+        st.session_state.settings_open = not settings_open
+        st.rerun()
+
+
 with st.sidebar:
     st.markdown("## CorpChat Intelligence")
     st.caption("Corporate Relationship & Chat Analytics")
@@ -137,6 +150,9 @@ with st.sidebar:
         ["Search", "Contacts", "Messages", "Overview", "Chat Viewer"],
         index=0,
     )
+    st.divider()
+    _render_sidebar_settings_toggle()
+
 
 # ═══════════════════════════════════════ DB helpers ════════════════════════════════════
 @st.cache_data(ttl=30)
@@ -414,16 +430,114 @@ def _node_color(node: dict) -> str:
     }.get(node["type"], "#8b949e")
 
 
+_CONSTELLATION_TPL = """<div id="cg" style="width:100%;height:__HEIGHT__px;background:#161b22;border:1px solid #30363d;border-radius:8px;position:relative;overflow:hidden;">
+<svg id="cg-svg" width="100%" height="__HEIGHT__" style="display:block;"></svg>
+<div id="cg-tip" style="position:absolute;left:0;top:0;display:none;background:#0d1117;color:#e6e6e6;border:1px solid #58a6ff;padding:3px 8px;border-radius:4px;font:12px 'Segoe UI',sans-serif;pointer-events:none;"></div>
+<script>
+(function() {
+  var NODES = __NODES__;
+  var EDGES = __EDGES__;
+  var H = __HEIGHT__;
+  var box = document.getElementById('cg');
+  var W = box.clientWidth || 900;
+  var svg = document.getElementById('cg-svg');
+  var tip = document.getElementById('cg-tip');
+  var NS = 'http://www.w3.org/2000/svg';
+  var P = [], IDX = {};
+  NODES.forEach(function(n, i) { P.push({i: i, id: n.id, x: Math.random()*W, y: Math.random()*H, vx: 0, vy: 0}); IDX[n.id] = i; });
+  var lines = EDGES.map(function() { var l = document.createElementNS(NS, 'line'); l.setAttribute('stroke', '#30363d'); l.setAttribute('stroke-width', '1'); svg.appendChild(l); return l; });
+  var circles = NODES.map(function(n) { var c = document.createElementNS(NS, 'circle'); c.setAttribute('r', n.size); c.setAttribute('fill', n.color); c.setAttribute('stroke', '#0d1117'); c.setAttribute('stroke-width', '2'); svg.appendChild(c); return c; });
+  var labels = NODES.map(function(n) { var t = document.createElementNS(NS, 'text'); t.setAttribute('fill', '#c9d1d9'); t.setAttribute('font-size', '10'); t.setAttribute('text-anchor', 'middle'); t.textContent = n.label; svg.appendChild(t); return t; });
+  var drag = null;
+  function pos(ev) { var r = svg.getBoundingClientRect(); return {x: ev.clientX - r.left, y: ev.clientY - r.top}; }
+  svg.addEventListener('mousedown', function(ev) {
+    var p = pos(ev);
+    for (var i = P.length - 1; i >= 0; i--) {
+      var d = Math.hypot(p.x - P[i].x, p.y - P[i].y);
+      if (d < 22) { drag = P[i]; drag.fx = p.x; drag.fy = p.y; ev.preventDefault(); return; }
+    }
+  });
+  window.addEventListener('mousemove', function(ev) { if (drag) { var p = pos(ev); drag.fx = p.x; drag.fy = p.y; } });
+  window.addEventListener('mouseup', function() { drag = null; });
+  svg.addEventListener('mousemove', function(ev) {
+    var p = pos(ev), hit = null;
+    for (var i = 0; i < P.length; i++) { if (Math.hypot(p.x - P[i].x, p.y - P[i].y) < 24) hit = P[i]; }
+    if (hit) { tip.style.display = 'block'; tip.style.left = (p.x + 12) + 'px'; tip.style.top = (p.y + 12) + 'px'; tip.textContent = NODES[hit.i].label; }
+    else { tip.style.display = 'none'; }
+  });
+  function tick() {
+    for (var a = 0; a < P.length; a++) for (var b = a + 1; b < P.length; b++) {
+      var A = P[a], B = P[b], dx = B.x - A.x, dy = B.y - A.y, d2 = dx*dx + dy*dy + 1, d = Math.sqrt(d2);
+      var f = 14000 / d2;
+      A.vx -= dx/d*f; A.vy -= dy/d*f; B.vx += dx/d*f; B.vy += dy/d*f;
+    }
+    EDGES.forEach(function(e) {
+      var A = P[IDX[e.s]], B = P[IDX[e.t]];
+      if (A === undefined || B === undefined) return;
+      var dx = B.x - A.x, dy = B.y - A.y, d = Math.sqrt(dx*dx + dy*dy + 1), f = (d - 110) * 0.015;
+      A.vx += dx/d*f; A.vy += dy/d*f; B.vx -= dx/d*f; B.vy -= dy/d*f;
+    });
+    for (var i = 0; i < P.length; i++) {
+      var p = P[i];
+      if (drag === p) { p.x = p.fx; p.y = p.fy; p.vx = 0; p.vy = 0; }
+      else {
+        p.vx = (p.vx + (W/2 - p.x)*0.0015) * 0.85; p.vy = (p.vy + (H/2 - p.y)*0.0015) * 0.85;
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < 10) p.x = 10; if (p.x > W - 10) p.x = W - 10;
+        if (p.y < 10) p.y = 10; if (p.y > H - 10) p.y = H - 10;
+      }
+    }
+    for (var e = 0; e < EDGES.length; e++) {
+      var A = P[IDX[EDGES[e].s]], B = P[IDX[EDGES[e].t]];
+      if (A !== undefined && B !== undefined) {
+        lines[e].setAttribute('x1', A.x); lines[e].setAttribute('y1', A.y);
+        lines[e].setAttribute('x2', B.x); lines[e].setAttribute('y2', B.y);
+      }
+    }
+    for (var i = 0; i < P.length; i++) {
+      var p = P[i];
+      circles[i].setAttribute('cx', p.x); circles[i].setAttribute('cy', p.y);
+      labels[i].setAttribute('x', p.x); labels[i].setAttribute('y', p.y - 10);
+    }
+    requestAnimationFrame(tick);
+  }
+  tick();
+})();
+</script>
+</div>"""
+
+
+def _constellation_html(nodes: list, edges: list, height: int = 380) -> str:
+    """生成自包含 (无 CDN / 无外部库) 的力导向星座图 HTML。
+
+    经 st.iframe 以 srcdoc 方式隔离渲染 (JS 可运行, 拖拽/悬停/动画), 离线可用。
+    节点点击回填搜索由 render 侧 st.button 完成 (iframe 无 Python 桥)。
+    """
+    ns = json.dumps([
+        {"id": str(n["id"]), "label": str(n["label"])[:16], "color": _node_color(n),
+         "size": max(6, min(20, int(n.get("size", 10))))}
+        for n in nodes
+    ], ensure_ascii=False).replace("</", "<\\/")
+    es = json.dumps(
+        [{"s": str(e["source"]), "t": str(e["target"])} for e in edges],
+        ensure_ascii=False,
+    ).replace("</", "<\\/")
+    return (_CONSTELLATION_TPL
+            .replace("__NODES__", ns)
+            .replace("__EDGES__", es)
+            .replace("__HEIGHT__", str(height)))
+
+
 def _render_memory_graph(cfg: dict):
     """渲染 Hindsight 星座视图 (实体关系图)。
 
-    数据源: 会话聊天历史的检索结果 (raw_hits) + 对话记忆。
-    联动: 高怀疑度 → 风险标签高亮; 数据源 → 实体过滤; 点击节点 → 回填搜索框。
+    数据源: 会话聊天历史的检索结果 (raw_hits)。
+    渲染: 自包含 HTML/SVG 力导向图 (st.iframe srcdoc, 无外部依赖)。
+    联动: 高怀疑度 → 风险标签高亮; 数据源 → 实体过滤; 节点按钮 → 回填搜索框。
     整个渲染 try/except 兜底 —— 图谱故障不应破坏搜索 UI。
     """
     try:
         from apps.corpchat.search.memory_graph import build_entity_graph
-        from streamlit_agraph import Config, Edge, Node, agraph
 
         # 图谱数据: 会话历史中各轮检索结果 (含结构化 metadata)
         graph_messages = []
@@ -447,24 +561,25 @@ def _render_memory_graph(cfg: dict):
             risk_labels=risk,
         )
 
-        nodes = [
-            Node(id=n["id"], label=n["label"], size=int(n["size"]), color=_node_color(n))
-            for n in graph["nodes"]
-        ]
-        edges = [
-            Edge(source=e["source"], target=e["target"], label=e["label"])
-            for e in graph["edges"]
-        ]
-        config = Config(
-            width=460, height=420, directed=False, physics=True,
-            nodeHighlightBehavior=True, highlightColor="#F7A7A6", collapsible=True,
-        )
+        nodes = graph["nodes"]
+        edges = graph["edges"]
+        if not nodes:
+            st.caption("沒有可繪製的實體 (試著搜尋更多消息)。")
+            return
 
-        # 联动 3: 点击节点 → 回填搜索框
-        clicked = agraph(nodes=nodes, edges=edges, config=config)
-        if clicked:
-            st.session_state.search_query = str(clicked)
-            st.info(f"已填入搜索框: {clicked}")
+        # 自包含力导向星座图 (st.iframe srcdoc, JS 隔离运行)
+        st.iframe(_constellation_html(nodes, edges), height=400)
+
+        # 联动 3: 点击节点 → 回填搜索框 (实体节点按钮)
+        clickable = [n for n in nodes if n["type"] in ("person", "company", "label", "keyword")][:12]
+        if clickable:
+            st.caption("點擊節點 → 填入搜索框:")
+            cols = st.columns(min(3, len(clickable)))
+            for i, n in enumerate(clickable):
+                with cols[i % len(cols)]:
+                    if st.button(n["label"], key=f"graph_node_{i}", use_container_width=True):
+                        st.session_state.search_query = n["label"]
+                        st.rerun()
 
         # 联动 2 (展示): 数据源门控已在 build_entity_graph(sources=...) 生效
         st.caption(f"節點 {len(nodes)} · 邊 {len(edges)} · 數據源 {cfg['knowledge'].get('sources')}")
@@ -501,6 +616,72 @@ def _render_chat_history(history: list):
     return _process_window.render_chat_history(history, st, pd)
 
 # ═══════════════════════════════════════ pages ════════════════════════════════════
+def _render_settings_panel(cfg: dict):
+    """渲染右侧设置面板 (人格特質 / 搜索策略 / 知識範圍)。
+
+    即时生效, 会话级持久化 (session_state.agent_config)。显隐由左栏
+    ⚙️/✖ 开关控制 (settings_open)。
+    """
+    with st.expander("🎛️ 配置代理", expanded=False):
+        with st.expander("🧠 人格特質 (CARA)", expanded=False):
+            preset_label = st.selectbox(
+                "預設模式", list(PRESET_LABELS.keys()),
+                index=preset_index(cfg["persona"].get("preset", "custom")),
+                disabled=st.session_state.searching,
+            )
+            apply_preset(cfg, preset_label)
+            cfg["persona"]["skepticism"] = st.slider(
+                "懷疑度", 0, 10, int(cfg["persona"].get("skepticism", 5)),
+                help="對證據不足的結論標註不確定性", disabled=st.session_state.searching)
+            cfg["persona"]["literality"] = st.slider(
+                "字面性", 0, 10, int(cfg["persona"].get("literality", 5)),
+                help="嚴格依據檢索原文回答", disabled=st.session_state.searching)
+            cfg["persona"]["empathy"] = st.slider(
+                "共情度", 0, 10, int(cfg["persona"].get("empathy", 5)),
+                help="先回應情緒再給信息", disabled=st.session_state.searching)
+            style_label = st.selectbox(
+                "回答長度", list(STYLE_LABELS.keys()),
+                index=style_index(cfg["persona"].get("style", "standard")),
+                disabled=st.session_state.searching)
+            cfg["persona"]["style"] = STYLE_LABELS[style_label]
+
+        with st.expander("⚙️ 搜索策略", expanded=False):
+            depth_label = st.selectbox(
+                "檢索深度", ["简单", "深度"],
+                index=0 if cfg["search"].get("depth", "deep") == "simple" else 1,
+                help="简单=单步检索; 深度=跨表多步推理",
+                disabled=st.session_state.searching)
+            cfg["search"]["depth"] = "simple" if depth_label == "简单" else "deep"
+            cfg["search"]["expand"] = st.checkbox(
+                "查詢擴展", value=cfg["search"].get("expand", True),
+                help="LLM 语义重写 + 关键词", disabled=st.session_state.searching)
+            cfg["search"]["rerank"] = st.checkbox(
+                "重排序", value=cfg["search"].get("rerank", True),
+                help="交叉编码器重排", disabled=st.session_state.searching)
+            cfg["search"]["graph_hops"] = st.slider(
+                "Graph hops", 0, 3, int(cfg["search"].get("graph_hops", 1)),
+                disabled=st.session_state.searching)
+            cfg["search"]["graph_parallel"] = st.checkbox(
+                "Graph path", value=cfg["search"].get("graph_parallel", False),
+                help="圖遍歷作為融合路 (關係查詢)", disabled=st.session_state.searching)
+            cfg["search"]["top_k"] = st.slider(
+                "Top-k", 1, 20, int(cfg["search"].get("top_k", 5)),
+                disabled=st.session_state.searching)
+            cfg["search"]["label_filter"] = st.text_input(
+                "Label filter", value=cfg["search"].get("label_filter", ""),
+                help="e.g. quotation_request", disabled=st.session_state.searching)
+
+        with st.expander("📚 知識範圍", expanded=False):
+            source_labels = st.multiselect(
+                "數據源", SOURCE_OPTIONS,
+                default=sources_to_labels(cfg["knowledge"].get("sources", ["messages", "contacts"])),
+                disabled=st.session_state.searching)
+            cfg["knowledge"]["sources"] = sources_from_labels(source_labels)
+            cfg["knowledge"]["citations"] = st.checkbox(
+                "引用來源", value=cfg["knowledge"].get("citations", False),
+                help="答案附帶來源", disabled=st.session_state.searching)
+
+
 def _render_search_page():
     """Render the Search page (kept callable so tests can drive it)."""
     st.title("Search")
@@ -518,87 +699,33 @@ def _render_search_page():
             pending_turn = turn
             break
 
-    # Two-column layout: chat (wide) + controls (narrow right panel)
-    chat_col, ctrl_col = st.columns([3, 1])
+    # ── 统一 agent 配置 (设置面板关闭时仍保留上次值) ──
+    cfg = st.session_state.get("agent_config") or default_agent_config()
 
-    with ctrl_col:
-        # ── 🎛️ 配置代理: 单一入口, 即时生效, 会话级持久化 ──
-        cfg = st.session_state.get("agent_config") or default_agent_config()
+    # ── 布局: 右侧设置面板由左栏 ⚙️/✖ 开关控制 ──
+    settings_open = st.session_state.get("settings_open", False)
+    if settings_open:
+        chat_col, ctrl_col = st.columns([3, 1])
+        with ctrl_col:
+            _render_settings_panel(cfg)
+    else:
+        chat_col = st.container()
 
-        with st.expander("🎛️ 配置代理", expanded=False):
-            with st.expander("🧠 人格特質 (CARA)", expanded=False):
-                preset_label = st.selectbox(
-                    "預設模式", list(PRESET_LABELS.keys()),
-                    index=preset_index(cfg["persona"].get("preset", "custom")),
-                    disabled=st.session_state.searching,
-                )
-                apply_preset(cfg, preset_label)
-                cfg["persona"]["skepticism"] = st.slider(
-                    "懷疑度", 0, 10, int(cfg["persona"].get("skepticism", 5)),
-                    help="對證據不足的結論標註不確定性", disabled=st.session_state.searching)
-                cfg["persona"]["literality"] = st.slider(
-                    "字面性", 0, 10, int(cfg["persona"].get("literality", 5)),
-                    help="嚴格依據檢索原文回答", disabled=st.session_state.searching)
-                cfg["persona"]["empathy"] = st.slider(
-                    "共情度", 0, 10, int(cfg["persona"].get("empathy", 5)),
-                    help="先回應情緒再給信息", disabled=st.session_state.searching)
-                style_label = st.selectbox(
-                    "回答長度", list(STYLE_LABELS.keys()),
-                    index=style_index(cfg["persona"].get("style", "standard")),
-                    disabled=st.session_state.searching)
-                cfg["persona"]["style"] = STYLE_LABELS[style_label]
-
-            with st.expander("⚙️ 搜索策略", expanded=False):
-                depth_label = st.selectbox(
-                    "檢索深度", ["简单", "深度"],
-                    index=0 if cfg["search"].get("depth", "deep") == "simple" else 1,
-                    help="简单=单步检索; 深度=跨表多步推理",
-                    disabled=st.session_state.searching)
-                cfg["search"]["depth"] = "simple" if depth_label == "简单" else "deep"
-                cfg["search"]["expand"] = st.checkbox(
-                    "查詢擴展", value=cfg["search"].get("expand", True),
-                    help="LLM 语义重写 + 关键词", disabled=st.session_state.searching)
-                cfg["search"]["rerank"] = st.checkbox(
-                    "重排序", value=cfg["search"].get("rerank", True),
-                    help="交叉编码器重排", disabled=st.session_state.searching)
-                cfg["search"]["graph_hops"] = st.slider(
-                    "Graph hops", 0, 3, int(cfg["search"].get("graph_hops", 1)),
-                    disabled=st.session_state.searching)
-                cfg["search"]["graph_parallel"] = st.checkbox(
-                    "Graph path", value=cfg["search"].get("graph_parallel", False),
-                    help="圖遍歷作為融合路 (關係查詢)", disabled=st.session_state.searching)
-                cfg["search"]["top_k"] = st.slider(
-                    "Top-k", 1, 20, int(cfg["search"].get("top_k", 5)),
-                    disabled=st.session_state.searching)
-                cfg["search"]["label_filter"] = st.text_input(
-                    "Label filter", value=cfg["search"].get("label_filter", ""),
-                    help="e.g. quotation_request", disabled=st.session_state.searching)
-
-            with st.expander("📚 知識範圍", expanded=False):
-                source_labels = st.multiselect(
-                    "數據源", SOURCE_OPTIONS,
-                    default=sources_to_labels(cfg["knowledge"].get("sources", ["messages", "contacts"])),
-                    disabled=st.session_state.searching)
-                cfg["knowledge"]["sources"] = sources_from_labels(source_labels)
-                cfg["knowledge"]["citations"] = st.checkbox(
-                    "引用來源", value=cfg["knowledge"].get("citations", False),
-                    help="答案附帶來源", disabled=st.session_state.searching)
-
-            with st.expander("🕸️ 記憶圖譜", expanded=False):
-                _render_memory_graph(cfg)
-
-        # ── 派生局部变量 (供下游搜索/agent 使用; 即时生效) ──
-        st.session_state.agent_config = cfg
-        expand = cfg["search"]["expand"]
-        use_rerank = cfg["search"]["rerank"]
-        graph_expand = cfg["search"]["graph_hops"]
-        graph_parallel = cfg["search"]["graph_parallel"]
-        top_k = cfg["search"]["top_k"]
-        label_filter = cfg["search"]["label_filter"]
-        agent_enabled = (cfg["search"]["depth"] == "deep")
-        st.session_state.agent_enabled = agent_enabled
+    # ── 派生局部变量 (供下游搜索/agent 使用; 即时生效) ──
+    st.session_state.agent_config = cfg
+    expand = cfg["search"]["expand"]
+    use_rerank = cfg["search"]["rerank"]
+    graph_expand = cfg["search"]["graph_hops"]
+    graph_parallel = cfg["search"]["graph_parallel"]
+    top_k = cfg["search"]["top_k"]
+    label_filter = cfg["search"]["label_filter"]
+    agent_enabled = (cfg["search"]["depth"] == "deep")
+    st.session_state.agent_enabled = agent_enabled
 
     with chat_col:
+        # 记忆图谱 (星座视图): 有检索结果时显示在聊天区上方
+        _render_memory_graph(cfg)
+
         _render_chat_history(st.session_state.chat_history)
 
         # If there's a pending processing turn, handle it now

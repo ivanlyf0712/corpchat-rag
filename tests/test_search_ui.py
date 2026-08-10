@@ -43,6 +43,8 @@ class _Recorder:
         self.status_labels = []  # status.update(label=...) values
         self.search_calls = []   # _run_search invocations
         self.writes = []         # st.write(...) messages
+        self.iframes = []        # st.iframe(html) payloads
+        self.buttons = []        # st.button labels
         self.reruns = 0
 
     def reset(self):
@@ -52,6 +54,8 @@ class _Recorder:
         self.status_labels.clear()
         self.search_calls.clear()
         self.writes.clear()
+        self.iframes.clear()
+        self.buttons.clear()
         self.reruns = 0
 
 
@@ -94,6 +98,7 @@ def _make_fake_streamlit(recorder: _Recorder, search_impl=None):
 
     # Layout context managers
     st.empty = lambda *a, **k: _Ctx()
+    st.container = _noop_ctx
     st.expander = lambda *a, **k: (_Ctx(),
                                    recorder.expander_labels.append(a[0] if a else k.get("label", "")),
                                    recorder.expander_expanded.append(k.get("expanded")))[0]
@@ -103,7 +108,7 @@ def _make_fake_streamlit(recorder: _Recorder, search_impl=None):
     st.columns = lambda *a, **k: [_Ctx() for _ in range(len(a[0]) if a and isinstance(a[0], (list, tuple)) else (a[0] if a else 1))]
 
     # Widgets
-    st.button = lambda *a, **k: False
+    st.button = lambda *a, **k: (recorder.buttons.append(a[0] if a else k.get("label", "")) or False)
     # Respect the `value=` param so tests can opt out of agent mode by setting
     # ss["agent_enabled"] = False. Other checkboxes use value=True → still True.
     st.checkbox = lambda *a, **k: k.get("value", True)
@@ -117,7 +122,7 @@ def _make_fake_streamlit(recorder: _Recorder, search_impl=None):
     st.dataframe = _noop
     st.metric = _noop
     st.bar_chart = _noop
-    st.iframe = _noop
+    st.iframe = lambda *a, **k: recorder.iframes.append(a[0] if a else "")
     st.rerun = lambda: setattr(recorder, "reruns", recorder.reruns + 1)
 
     # Column config for dataframe column_config= (TextColumn / NumberColumn)
@@ -190,6 +195,9 @@ def _bind_recording_st(monkeypatch):
     """
     monkeypatch.setitem(sys.modules, "streamlit", _FAKE_ST)
     monkeypatch.setattr(app_module, "st", _FAKE_ST)
+    # 现有测试默认打开设置面板 (渲染配置控件), 与旧布局一致;
+    # 关闭面板的行为由专门的 settings 测试覆盖。
+    _FAKE_ST.session_state["settings_open"] = True
     yield
     monkeypatch.undo()
 
@@ -624,4 +632,106 @@ def test_on_stage_callback_never_breaks_processing(monkeypatch):
     agent._extract_search_query = lambda q: "合同已签"
     result = agent.process("帮我查一下合同已签的消息", on_stage=_boom)
     assert result.get("success") is True
+
+
+# ── Settings toggle: 左栏 ⚙️/✖ 控制右侧设置面板 ─────────────────────
+def test_settings_panel_hidden_when_closed(monkeypatch):
+    """设置面板关闭时: 不渲染 🎛️ 配置面板, 但 agent_config 仍派生。"""
+    from streamlit import session_state as ss
+    ss.pop("agent_config", None)  # 避免跨测试残留 (上一测试写入 depth=simple)
+    ss["settings_open"] = False
+    ss["chat_history"] = []
+    ss["searching"] = False
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+
+    app_module._render_search_page()
+
+    assert not any(str(l).startswith("🎛️") for l in _recorder.expander_labels), (
+        f"settings closed but panel rendered: {_recorder.expander_labels}"
+    )
+    cfg = ss.get("agent_config")
+    assert cfg is not None, "config 应始终派生 (供下游搜索使用)"
+    assert ss["agent_enabled"] is True  # 默认 depth=deep
+
+
+def test_settings_panel_rendered_when_open(monkeypatch):
+    """settings_open=True → 右侧渲染 🎛️ 配置面板。"""
+    from streamlit import session_state as ss
+    ss["settings_open"] = True
+    ss["chat_history"] = []
+    ss["searching"] = False
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+
+    app_module._render_search_page()
+
+    assert any(str(l).startswith("🎛️") for l in _recorder.expander_labels), (
+        f"settings open but panel missing: {_recorder.expander_labels}"
+    )
+
+
+def test_sidebar_toggle_button_flips_state(monkeypatch):
+    """点击 ⚙️/✖ 按钮 → settings_open 翻转 + rerun。"""
+    from streamlit import session_state as ss
+    ss["settings_open"] = False
+    _recorder.reruns = 0
+    monkeypatch.setattr(_FAKE_ST, "button", lambda *a, **k: True)
+
+    app_module._render_sidebar_settings_toggle()
+
+    assert ss["settings_open"] is True
+    assert _recorder.reruns == 1
+
+
+def test_sidebar_toggle_label_follows_state(monkeypatch):
+    """开关标签: 关闭时 ⚙️, 打开时 ✖。"""
+    from streamlit import session_state as ss
+    ss["settings_open"] = False
+    app_module._render_sidebar_settings_toggle()
+    assert _recorder.buttons and str(_recorder.buttons[-1]).startswith("⚙️")
+
+    ss["settings_open"] = True
+    app_module._render_sidebar_settings_toggle()
+    assert _recorder.buttons and str(_recorder.buttons[-1]).startswith("✖")
+
+
+# ── Memory graph: 自包含 SVG 星座图 (不再依赖 streamlit-agraph) ─────
+def test_memory_graph_renders_iframe_and_buttons(monkeypatch):
+    """有 raw_hits 时, 图谱以 iframe + 节点按钮渲染。"""
+    from streamlit import session_state as ss
+    ss["settings_open"] = True
+    ss["chat_history"] = [{
+        "query": "物流報價",
+        "answer": "ok",
+        "raw_hits": [{
+            "id": "m1", "text": "合同已签 物流报价", "score": 0.9,
+            "metadata": {"customer_name": "高健銘", "company": "DCH",
+                         "label": "old_friend_reconnect", "open_kfid": "k1"},
+        }],
+        "status": "done",
+    }]
+    ss["searching"] = False
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+
+    app_module._render_search_page()
+
+    assert _recorder.iframes, "graph iframe not rendered"
+    html = _recorder.iframes[0]
+    assert "<svg" in html and "<script>" in html, "graph HTML malformed"
+    # 实体节点按钮 (person 高健銘 等)
+    assert any("高健銘" in str(b) for b in _recorder.buttons), (
+        f"node button missing: {_recorder.buttons}"
+    )
+
+
+def test_memory_graph_empty_state_no_iframe(monkeypatch):
+    """无检索结果时不渲染 iframe, 只显示提示。"""
+    from streamlit import session_state as ss
+    ss["settings_open"] = True
+    ss["chat_history"] = []
+    ss["searching"] = False
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+
+    app_module._render_search_page()
+
+    assert not _recorder.iframes, "empty graph should not render an iframe"
 
