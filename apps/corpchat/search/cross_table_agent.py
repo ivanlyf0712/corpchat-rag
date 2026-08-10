@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import (
     LITELLM_API_KEY,
@@ -36,6 +36,65 @@ try:
     _LANGCHAIN_AVAILABLE = True
 except ImportError:
     logger.warning("LangChain not available — cross-table agent will use fallback mode")
+
+
+# ── Intent keyword tables (rule fast-path & LLM-down fallback) ────
+_GREETING_KEYWORDS = (
+    "hi", "hello", "hey", "hiya", "howdy", "greetings",
+    "how are you", "how's it going", "how are you doing", "how do you do",
+    "what's up", "whats up", "good morning", "good afternoon", "good evening",
+    "long time no see", "nice to meet you", "good to see you",
+    "嗨", "你好", "哈囉", "早安", "午安", "晚安",
+    "最近怎么样", "最近怎樣", "吃了嗎", "吃了吗",
+)
+
+_SYSTEM_KEYWORDS = (
+    "你是誰", "你是谁", "what can you do", "能做什麼", "能做什么",
+    "能做", "功能", "能力", "help", "使用說明", "搜索範圍",
+    "你会什么", "你會什麼", "你会做什么", "你會做什麼",
+)
+
+_CONTACT_KEYWORDS = (
+    "邮箱", "郵箱", "email", "电话", "電話", "phone", "公司", "职位", "職位",
+    "联系方式", "聯繫方式", "userid", "who is", "who are", "是谁", "是誰",
+    "contact", "contacts", "联系人", "聯絡人", "名字", "姓名", "name",
+    "male", "female", "男生", "女生", "先生", "女士",
+)
+
+_MESSAGE_KEYWORDS = (
+    "消息", "说了", "說了", "说", "說", "聊", "对话", "對話", "聊天",
+    "spoke", "talked", "said", "sent", "message", "conversation",
+    "发", "發", "收到", "内容", "內容", "what did", "who did",
+)
+
+_CROSS_TABLE_TERMS = (
+    "spoke to", "talked to", "跟谁", "和谁", "跟誰", "和誰",
+    "发", "發", "消息的人", "訊息的人",
+)
+
+# Per-(api_base, api_key) LLM availability cache — avoids a /v1/models
+# probe on every query (app.py constructs a fresh CrossTableAgent per request).
+_LLM_AVAILABILITY_CACHE: Dict[Tuple[str, str], bool] = {}
+
+
+def _is_greeting_query(q: str) -> bool:
+    """Greeting detection shared by the tool router and the quick-respond gate.
+
+    Single tokens match whole-word (so "hi" never fires inside "which"/"this"),
+    multi-word phrases match as substrings, and CJK phrases match on their own
+    boundaries. Kept conservative: courteous-prefix greetings ("您好", "在嗎")
+    are deliberately excluded — the LLM classify path covers those, and a
+    greeting word must never swallow a search request.
+    """
+    if len(q) >= 20:
+        return False
+    for g in _GREETING_KEYWORDS:
+        if " " in g or "'" in g or "-" in g:
+            if g in q:
+                return True
+        elif re.search(rf"(^|[^a-z]){re.escape(g)}([^a-z]|$)", q):
+            return True
+    return False
 
 
 class _LiteLLMWrapper(BaseChatModel):
@@ -68,34 +127,21 @@ class _LiteLLMWrapper(BaseChatModel):
         """
         q = user_input.lower().strip()
 
-        # Greeting / system questions → no tools
-        greetings = ["hi", "hello", "hey", "嗨", "你好", "哈囉", "早安", "午安", "晚安"]
-        system_kws = ["你是誰", "你是谁", "what can you do", "能做什麼", "能做什么",
-                      "能做", "功能", "能力", "help", "使用說明", "搜索範圍",
-                      "你会什么", "你會什麼", "你会做什么", "你會做什麼"]
-        if any(g in q for g in greetings) and len(q) < 20:
-            return []
-        if any(kw in q for kw in system_kws):
-            return []
-
-
         # Contact-detail questions → search_contacts
-        contact_kws = ["邮箱", "郵箱", "email", "电话", "電話", "phone", "公司", "职位", "職位",
-                       "联系方式", "聯繫方式", "userid", "who is", "who are", "是谁", "是誰",
-                       "contact", "contacts", "联系人", "聯絡人", "名字", "姓名", "name",
-                       "male", "female", "男生", "女生", "先生", "女士"]
+        wants_contact = any(kw in q for kw in _CONTACT_KEYWORDS)
         # Message questions → search_messages
-        message_kws = ["消息", "说了", "說了", "说", "說", "聊", "对话", "對話", "聊天",
-                       "spoke", "talked", "said", "sent", "message", "conversation",
-                       "发", "發", "收到", "内容", "內容", "what did", "who did"]
-
-        wants_contact = any(kw in q for kw in contact_kws)
-        wants_message = any(kw in q for kw in message_kws)
+        wants_message = any(kw in q for kw in _MESSAGE_KEYWORDS)
 
         # Cross-table: "who did X spoke to" / "发'X'消息的人" → both
-        cross_table = ("spoke to" in q or "talked to" in q or "跟谁" in q or "和谁" in q
-                       or "跟誰" in q or "和誰" in q or "发" in q or "發" in q
-                       or "消息的人" in q or "訊息的人" in q)
+        cross_table = any(t in q for t in _CROSS_TABLE_TERMS)
+
+        # Greeting / system questions → no tools.
+        # Checked AFTER search keywords so an explicit search request wins
+        # over a courtesy greeting word embedded in it.
+        if not (wants_contact or wants_message or cross_table) and _is_greeting_query(q):
+            return []
+        if not (wants_contact or wants_message or cross_table) and any(kw in q for kw in _SYSTEM_KEYWORDS):
+            return []
 
         tool_calls = []
         if wants_message or cross_table:
@@ -455,49 +501,170 @@ class CrossTableAgent:
 
 
     def _quick_respond(self, user_input: str) -> Optional[str]:
-        """Handle greetings and system questions without invoking tools."""
+        """Handle greetings and system questions without invoking tools.
+
+        LLM-first intent classification when the LLM is reachable:
+          greeting → LLM-generated greeting response
+          system   → self-description
+          search   → proceed to tool routing
+
+        Falls back to keyword rules with preset replies when the LLM is down.
+        A cheap keyword gate skips the LLM round-trip for obvious search
+        queries, so search latency is unchanged.
+        """
         q = user_input.lower().strip()
         lang = self._detect_language(user_input)
 
-        # Greeting detection
-        greetings = ["hi", "hello", "hey", "嗨", "你好", "哈囉", "早安", "午安", "晚安"]
-        if any(g in q for g in greetings) and len(q) < 20:
-            if lang == "en":
-                return "Hello! I'm CorpChat Intelligence. I can search chat messages and contact info. How can I help?"
-            return "你好！我是 CorpChat 智能搜索助手。我可以帮你搜索聊天记录和联系人信息。请问有什么可以帮你的？"
+        # Fast gate: clearly a search query -> skip the LLM classify round-trip
+        if self._rule_search_hint(q):
+            return None
 
-        # System info detection
-        system_kws = ["你是誰", "你是谁", "what can you do", "能做什麼", "能做什么",
-                      "能做", "功能", "能力", "help", "使用說明", "搜索範圍",
-                      "你会什么", "你會什麼", "你会做什么", "你會做什麼"]
+        if self._check_llm():
+            intent = self._llm_classify_intent(user_input)
+            if intent == "greeting":
+                return self._generate_greeting(user_input, lang)
+            if intent == "system":
+                return self._system_info_text(lang)
+            if intent == "search":
+                return None
+            # LLM returned nothing usable -> fall through to keyword rules
 
-        if any(kw in q for kw in system_kws):
-            if lang == "en":
-                return (
-                    "I'm **CorpChat Intelligence**, a cross-source search assistant.\n\n"
-                    "**Capabilities:**\n"
-                    "- 🔍 **Search chat messages** — find conversations, content, labels\n"
-                    "- 👤 **Search contacts** — find email, phone, company, title\n"
-                    "- 🔗 **Cross-table reasoning** — find sender from message, then contact details\n\n"
-                    "**Examples:**\n"
-                    "- \"What is 李雅婷's email?\"\n"
-                    "- \"Who sent the '合同已签' message and what's their email?\"\n"
-                    "- \"Any new messages today?\"\n"
-                    "- \"Find messages about fraud\""
-                )
-            return (
-                "我是 **CorpChat 智能搜索助手**，可以跨数据源检索信息。\n\n"
-                "**可用能力：**\n"
-                "- 🔍 **搜索聊天消息** — 查找对话、消息内容、标签等\n"
-                "- 👤 **搜索联系人** — 查找邮箱、电话、公司、职位\n"
-                "- 🔗 **跨表推理** — 先查消息找到发送者，再查联系人获取详细信息\n\n"
-                "**示例：**\n"
-                "- \"李雅婷的邮箱是什么？\"\n"
-                "- \"发'合同已签'消息的人，他的邮箱是什么？\"\n"
-                "- \"今天有什么新消息？\"\n"
-                "- \"帮我查一下诈骗相关的消息\""
-            )
+        # Keyword rules (LLM down, or LLM classification produced nothing)
+        if _is_greeting_query(q):
+            return self._PRESET_GREETING_EN if lang == "en" else self._PRESET_GREETING_ZH
+        if any(kw in q for kw in _SYSTEM_KEYWORDS):
+            return self._system_info_text(lang)
         return None
+
+    # -- Preset replies -- used ONLY when the LLM is unavailable -----
+    _PRESET_GREETING_EN = (
+        "Hello! I'm CorpChat Intelligence. I can search chat messages and "
+        "contact info. How can I help?"
+    )
+    _PRESET_GREETING_ZH = (
+        "你好！我是 CorpChat 智能搜索助手。我可以帮你搜索聊天记录和联系人信息。"
+        "请问有什么可以帮你的？"
+    )
+
+    @staticmethod
+    def _rule_search_hint(q: str) -> bool:
+        """Cheap 'clearly a search query' hint - skips the LLM classify round-trip."""
+        return (
+            any(kw in q for kw in _CONTACT_KEYWORDS)
+            or any(kw in q for kw in _MESSAGE_KEYWORDS)
+            or any(t in q for t in _CROSS_TABLE_TERMS)
+        )
+
+    def _check_llm(self) -> bool:
+        """Whether the LLM endpoint is reachable (cached per base+key)."""
+        if not self.api_key:
+            return False
+        cache_key = (self.api_base, self.api_key)
+        if cache_key in _LLM_AVAILABILITY_CACHE:
+            return _LLM_AVAILABILITY_CACHE[cache_key]
+        try:
+            from .litellm_client import LiteLLMClient
+            ok = bool(
+                LiteLLMClient(api_base=self.api_base, api_key=self.api_key).is_available(timeout=3)
+            )
+        except Exception:
+            ok = False
+        _LLM_AVAILABILITY_CACHE[cache_key] = ok
+        return ok
+
+    def _llm_classify_intent(self, user_input: str) -> Optional[str]:
+        """Classify intent with the LLM: 'greeting' | 'system' | 'search'.
+
+        Returns None when the LLM is unavailable or returns something
+        unrecognized, so the caller can fall back to keyword rules.
+        """
+        try:
+            from .litellm_client import LiteLLMClient
+            client = LiteLLMClient(api_base=self.api_base, api_key=self.api_key)
+            result = client.chat(
+                [
+                    {"role": "system", "content": (
+                        "You are an intent classifier for a chat-search assistant. "
+                        "Classify the user's message into exactly one category:\n"
+                        "- greeting: casual greeting or small talk "
+                        "(hi, hello, how are you, good morning, 你好, 最近怎么样)\n"
+                        "- system: asking about the assistant's capabilities or identity "
+                        "(who are you, what can you do, 你会什么)\n"
+                        "- search: anything requesting information from chat messages or contacts\n"
+                        "Reply with ONLY the category name: greeting, system, or search."
+                    )},
+                    {"role": "user", "content": user_input},
+                ],
+                temperature=0.0,
+                max_tokens=8,
+                timeout=3,
+            )
+            result = (result or "").strip().lower()
+            for intent in ("greeting", "system", "search"):
+                if intent in result:
+                    return intent
+        except Exception as e:
+            logger.debug(f"LLM intent classification failed: {e}")
+        return None
+
+    def _generate_greeting(self, user_input: str, lang: str) -> str:
+        """LLM-generated greeting response; preset fallback when LLM is down."""
+        try:
+            from .litellm_client import LiteLLMClient
+            client = LiteLLMClient(api_base=self.api_base, api_key=self.api_key)
+            lang_name = {
+                "en": "English",
+                "zh-TW": "Traditional Chinese",
+                "zh-CN": "Simplified Chinese",
+            }.get(lang, "English")
+            result = client.chat(
+                [
+                    {"role": "system", "content": (
+                        f"You are CorpChat Intelligence, a friendly enterprise chat-search "
+                        f"assistant. Reply to the user's greeting naturally in {lang_name}. "
+                        f"Keep it short, warm, and context-aware. Do NOT mention that you are "
+                        f"an AI or list capabilities. Briefly invite them to search chat "
+                        f"messages or contacts if they need help."
+                    )},
+                    {"role": "user", "content": user_input or "Hi!"},
+                ],
+                temperature=0.7,
+                max_tokens=80,
+                timeout=5,
+            )
+            if result and result.strip():
+                return result.strip()
+        except Exception as e:
+            logger.debug(f"LLM greeting generation failed: {e}")
+        return self._PRESET_GREETING_EN if lang == "en" else self._PRESET_GREETING_ZH
+
+    def _system_info_text(self, lang: str) -> str:
+        """Self-description answer. Kept static - only greetings are LLM-generated."""
+        if lang == "en":
+            return (
+                "I'm **CorpChat Intelligence**, a cross-source search assistant.\n\n"
+                "**Capabilities:**\n"
+                "- 🔍 **Search chat messages** — find conversations, content, labels\n"
+                "- 👤 **Search contacts** — find email, phone, company, title\n"
+                "- 🔗 **Cross-table reasoning** — find sender from message, then contact details\n\n"
+                "**Examples:**\n"
+                "- \"What is 李雅婷's email?\"\n"
+                "- \"Who sent the '合同已签' message and what's their email?\"\n"
+                "- \"Any new messages today?\"\n"
+                "- \"Find messages about fraud\"\n"
+            )
+        return (
+            "我是 **CorpChat 智能搜索助手**，可以跨数据源检索信息。\n\n"
+            "**可用能力：**\n"
+            "- 🔍 **搜索聊天消息** — 查找对话、消息内容、标签等\n"
+            "- 👤 **搜索联系人** — 查找邮箱、电话、公司、职位\n"
+            "- 🔗 **跨表推理** — 先查消息找到发送者，再查联系人获取详细信息\n\n"
+            "**示例：**\n"
+            "- \"李雅婷的邮箱是什么？\"\n"
+            "- \"发'合同已签'消息的人，他的邮箱是什么？\"\n"
+            "- \"今天有什么新消息？\"\n"
+            "- \"帮我查一下诈骗相关的消息\"\n"
+        )
 
     def _fallback_process(self, user_input: str, error: str = "") -> Dict[str, Any]:
         """

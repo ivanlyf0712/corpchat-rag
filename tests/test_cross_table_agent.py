@@ -99,3 +99,94 @@ class TestFormatFallbackAnswer:
             "A 的消息是什么？", msg_result, contact_result
         )
         assert "明天开会" in answer, f"Expected content line, got: {answer}"
+
+
+# ── Greeting intent: LLM classify + LLM-generated reply ────────────────────
+class TestGreetingHandling:
+    """'how are you' and friends must route as greetings (no tools), and
+    greeting replies must be LLM-generated when the LLM is available."""
+
+    def _agent(self, **kw):
+        return CrossTableAgent(**kw)
+
+    def test_how_are_you_no_tools_llm_down(self, monkeypatch):
+        """'how are you?' must NOT trigger a search (rules path, LLM down)."""
+        agent = self._agent()
+        monkeypatch.setattr(agent, "_check_llm", lambda: False)
+        result = agent.process("how are you?")
+        assert result.get("fallback") is False
+        assert len(result.get("tool_calls", [])) == 0, "greeting must not call tools"
+        assert result.get("output")
+
+    def test_greeting_variants_no_tools(self, monkeypatch):
+        agent = self._agent()
+        monkeypatch.setattr(agent, "_check_llm", lambda: False)
+        for q in ("Hi", "hello", "hey", "how are you", "how's it going",
+                  "good morning", "你好", "哈囉", "早安", "最近怎么样"):
+            result = agent.process(q)
+            assert len(result.get("tool_calls", [])) == 0, f"{q!r} should be a greeting"
+            assert result.get("output"), f"{q!r} should produce an answer"
+
+    def test_decide_tool_calls_how_are_you_no_tools(self):
+        from apps.corpchat.search.cross_table_agent import _LiteLLMWrapper
+        w = _LiteLLMWrapper(api_base="", api_key="", model="test")
+        assert w._decide_tool_calls("how are you?") == []
+
+    def test_decide_tool_calls_hi_inside_word_not_greeting(self):
+        """'hi' inside 'this' must not swallow a search (whole-word matching)."""
+        from apps.corpchat.search.cross_table_agent import _LiteLLMWrapper
+        w = _LiteLLMWrapper(api_base="", api_key="", model="test")
+        names = [c["name"] for c in w._decide_tool_calls("this is it")]
+        assert "search_messages" in names
+
+    def test_quick_respond_llm_classifies_greeting(self, monkeypatch):
+        """LLM drives greeting intent when available."""
+        agent = self._agent(api_base="http://fake", api_key="k")
+        seen = []
+        monkeypatch.setattr(agent, "_check_llm", lambda: True)
+        monkeypatch.setattr(agent, "_llm_classify_intent",
+                            lambda u: seen.append(u) or "greeting")
+        monkeypatch.setattr(agent, "_generate_greeting", lambda u, lang: "LLM GREETING")
+        assert agent._quick_respond("how are you?") == "LLM GREETING"
+        assert seen == ["how are you?"]
+
+    def test_quick_respond_llm_generates_greeting(self, monkeypatch):
+        """Greeting answer comes from the LLM, not the preset string."""
+        agent = self._agent(api_base="http://fake", api_key="k")
+        monkeypatch.setattr(agent, "_check_llm", lambda: True)
+        monkeypatch.setattr(agent, "_llm_classify_intent", lambda u: "greeting")
+        monkeypatch.setattr(
+            "apps.corpchat.search.litellm_client.LiteLLMClient.chat",
+            lambda self, messages, **kw: "Hello! How can I help you search today?",
+        )
+        out = agent._quick_respond("how are you?")
+        assert out == "Hello! How can I help you search today?"
+        assert out != agent._PRESET_GREETING_EN
+
+    def test_quick_respond_preset_when_llm_generation_fails(self, monkeypatch):
+        """Preset fallback when the LLM call fails mid-greeting."""
+        agent = self._agent(api_base="http://fake", api_key="k")
+        monkeypatch.setattr(agent, "_check_llm", lambda: True)
+        monkeypatch.setattr(agent, "_llm_classify_intent", lambda u: "greeting")
+
+        def boom(self, messages, **kw):
+            raise RuntimeError("llm down")
+
+        monkeypatch.setattr("apps.corpchat.search.litellm_client.LiteLLMClient.chat", boom)
+        out = agent._quick_respond("hello")
+        assert "CorpChat" in out  # preset fallback
+
+    def test_quick_respond_llm_down_preset(self, monkeypatch):
+        agent = self._agent()
+        monkeypatch.setattr(agent, "_check_llm", lambda: False)
+        assert agent._quick_respond("hello") == agent._PRESET_GREETING_EN
+
+    def test_search_hint_skips_llm_classify(self, monkeypatch):
+        """Obvious search queries skip the LLM classify round-trip."""
+        agent = self._agent(api_base="http://fake", api_key="k")
+        classified = []
+        monkeypatch.setattr(agent, "_check_llm", lambda: True)
+        monkeypatch.setattr(agent, "_llm_classify_intent",
+                            lambda u: classified.append(u) or "search")
+        assert agent._quick_respond("李雅婷的邮箱是什么？") is None
+        assert classified == [], "search-hint query must not hit LLM classify"
