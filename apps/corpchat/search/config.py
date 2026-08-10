@@ -88,6 +88,13 @@ TEMPORAL_LIMIT_SCALE = float(os.getenv("TEMPORAL_LIMIT_SCALE", "5.0"))
 # bare "最近/近" 的默认窗口 (天)。
 TEMPORAL_DEFAULT_WINDOW_DAYS = int(os.getenv("TEMPORAL_DEFAULT_WINDOW_DAYS", "7"))
 
+# ── 图并行检索 (Hindsight graph-traversal path, 默认关闭) ───────
+# 图遍历作为独立检索路参与 RRF 融合时的权重 (opt-in: search(graph_parallel=True))。
+# 默认关闭, 保留 append-only 图扩展 (ADR-0001) 为默认行为。
+GRAPH_RETRIEVAL_WEIGHT = float(os.getenv("GRAPH_RETRIEVAL_WEIGHT", "0.8"))
+GRAPH_PARALLEL_HOP_DISCOUNT = float(os.getenv("GRAPH_PARALLEL_HOP_DISCOUNT", "0.8"))
+GRAPH_PARALLEL_SEED_LIMIT = int(os.getenv("GRAPH_PARALLEL_SEED_LIMIT", "10"))
+
 # ── LiteLLM 配置 (密钥必须从环境变量提供, 不硬编码) ──────────────
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
 LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "https://your-litellm-proxy.example.com/")

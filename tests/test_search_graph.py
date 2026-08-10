@@ -136,21 +136,21 @@ def _compute_structural_relationships(docs):
     return relationships
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def test_index(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("corpchat_graph")
     idx = _build_test_index(tmp)
     yield idx
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def embeddings(test_index):
     embeddings = txtai.Embeddings()
     embeddings.load(test_index)
     return embeddings
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def searcher(embeddings):
     return Searcher(embeddings)
 

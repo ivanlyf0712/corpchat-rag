@@ -13,6 +13,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import txtai
 
 from .config import (
+    GRAPH_PARALLEL_HOP_DISCOUNT,
+    GRAPH_PARALLEL_SEED_LIMIT,
+    GRAPH_RETRIEVAL_WEIGHT,
     MAX_SEARCH_LIMIT,
     ORIGINAL_QUERY_WEIGHT,
     RRF_K_VALUE,
@@ -78,20 +81,22 @@ class Searcher:
         limit: int,
         expand: bool = True,
         scale: float = 3.0,
+        graph_parallel: bool = False,
     ) -> List[Tuple[List[Tuple[str, float]], float]]:
         """
         组装加权 RRF 融合输入: 每条扩展查询一路结果。
 
-        当前唯一的路来源是 LLM 查询扩展:
-          原始查询 (ORIGINAL_QUERY_WEIGHT)
-          语义重写 (LLM_SEMANTIC_QUERY_WEIGHT)
-          关键词扩展 (LLM_KEYWORD_QUERY_WEIGHT)
-        每条路 = (结果列表, 权重)。未来新增检索路 (时序 / 图并行) 在此追加
+        当前的路来源:
+          - LLM 查询扩展 (原始 0.5 / 语义 1.3 / 关键词 1.0)
+          - 图并行检索 (opt-in, graph_parallel=True, GRAPH_RETRIEVAL_WEIGHT)
+        每条路 = (结果列表, 权重)。未来新增检索路 (时序) 在此追加
         一个 (结果列表, 权重) 条目即可, 无需修改调用方。各路相互独立,
         未来可并行执行。
 
         scale: 检索量倍率 (默认 3.0 保持历史行为 limit*3)。时序窗口存在时
         调用方传入更大的 scale 以避免窗口过滤饿死结果。
+        graph_parallel: 图遍历作为独立检索路参与 RRF 融合 (默认关闭,
+        append-only 图扩展保持为默认行为, 见 ADR-0001)。
         """
         queries_with_weights: List[Tuple[str, float]] = [(query, ORIGINAL_QUERY_WEIGHT)]
         try:
@@ -111,6 +116,15 @@ class Searcher:
                 if parsed:
                     result_list.append((parsed["id"], parsed["score"]))
             all_results.append((result_list, q_weight))
+
+        # 图并行检索路 (opt-in): 结构性邻居作为独立信号参与融合
+        if graph_parallel and self.embeddings.graph:
+            try:
+                graph_results = self._graph_path_retrieve(query, limit=limit)
+                if graph_results:
+                    all_results.append((graph_results, GRAPH_RETRIEVAL_WEIGHT))
+            except Exception as e:
+                logger.warning(f"图并行检索失败: {e}")
 
         return all_results
 
@@ -180,6 +194,82 @@ class Searcher:
             logger.warning(f"时序检索失败: {e}")
             return []
 
+    # ── 图并行检索 (Hindsight graph-traversal path, opt-in) ─────
+    def _graph_query_scores(self, query: str) -> Dict[str, float]:
+        """Query-consistency gate: id -> relevance scores from a single hybrid search."""
+        query_scores: Dict[str, float] = {}
+        if not query:
+            return query_scores
+        try:
+            q_raw = self.embeddings.search(_segment(query), limit=MAX_SEARCH_LIMIT)
+            for item in q_raw:
+                parsed = self._parse_txtai_result(item)
+                if parsed:
+                    query_scores[parsed["id"]] = parsed.get("score", 0.0)
+        except Exception:
+            query_scores = {}
+        return query_scores
+
+    def _graph_path_retrieve(self, query: str, limit: int) -> List[Tuple[str, float]]:
+        """
+        图遍历作为独立检索路: 从相关种子出发沿 4 种 traversal-eligible 结构边
+        1 跳遍历, 返回 (doc_id, score) 排序列表, 供 RRF 融合。
+
+        与 _graph_expand (append-only, 融合后追加) 的区别:
+          本方法产出的列表参与 RRF 融合, 图结果可凭 GRAPH_RETRIEVAL_WEIGHT
+          提升排序, 而非仅追加在 base 下方。默认关闭 (graph_parallel=False),
+          append-only 契约 (ADR-0001) 保持为默认行为。
+
+        score = Σ_seeds seed_score × hop_discount × neighbor_query_relevance
+        邻居必须通过 query-consistency gate (relevance > 0), 无关邻居不 surfacing。
+        """
+        graph = self.embeddings.graph
+        if not graph or not query:
+            return []
+
+        query_scores = self._graph_query_scores(query)
+        if not query_scores:
+            return []
+
+        # doc-id -> node-key map (一次性构建)
+        id_to_key = {}
+        for key, attrs in graph.scan(data=True):
+            id_to_key[attrs["id"]] = key
+
+        TRAVERSAL_RELATIONS = {
+            "same_conversation", "sender_receiver",
+            "same_sender", "same_company",
+        }
+
+        seeds = sorted(query_scores.items(), key=lambda kv: kv[1], reverse=True)[:GRAPH_PARALLEL_SEED_LIMIT]
+        seed_ids = {seed_id for seed_id, _ in seeds}
+
+        neighbor_scores: Dict[str, float] = defaultdict(float)
+        for seed_id, seed_score in seeds:
+            seed_key = id_to_key.get(seed_id)
+            if seed_key is None:
+                continue
+            neighbors = graph.edges(seed_key)
+            if not neighbors:
+                continue
+            for neighbor_key, edge_attrs in neighbors.items():
+                relation = edge_attrs.get("relation", "")
+                if relation not in TRAVERSAL_RELATIONS:
+                    continue
+                neighbor_attrs = graph.node(neighbor_key)
+                if not neighbor_attrs:
+                    continue
+                neighbor_id = neighbor_attrs.get("id")
+                if not neighbor_id or neighbor_id in seed_ids:
+                    continue  # 种子已走内容路, 图路只贡献结构性邻居
+                relevance = query_scores.get(neighbor_id, 0.0)
+                if relevance <= 0.0:
+                    continue  # query-consistency gate
+                neighbor_scores[neighbor_id] += seed_score * GRAPH_PARALLEL_HOP_DISCOUNT * relevance
+
+        ranked = sorted(neighbor_scores.items(), key=lambda kv: kv[1], reverse=True)
+        return ranked[:limit]
+
     # ── 图扩展 (纯结构, 直接 backend API) ──────────────────────
     def _graph_expand(self, results: List[Dict], max_expand: int = 3,
                        hop_discount: float = 0.8, limit: int = 20,
@@ -210,16 +300,7 @@ class Searcher:
 
         # Query-consistency gate: run the query search ONCE, build id -> score map.
         # Avoids an N+1 full search per neighbor.
-        query_scores: Dict[str, float] = {}
-        if query:
-            try:
-                q_raw = self.embeddings.search(_segment(query), limit=MAX_SEARCH_LIMIT)
-                for item in q_raw:
-                    parsed = self._parse_txtai_result(item)
-                    if parsed:
-                        query_scores[parsed["id"]] = parsed.get("score", 0.0)
-            except Exception:
-                query_scores = {}
+        query_scores = self._graph_query_scores(query)
 
         def _passes_filters(doc: Dict) -> bool:
             meta = doc.get("metadata", {})
@@ -380,6 +461,7 @@ class Searcher:
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         use_rerank: bool = True,
+        graph_parallel: bool = False,
     ) -> List[Dict]:
         """
         执行搜索 (默认启用全链路搜索)。
@@ -467,7 +549,7 @@ class Searcher:
             return output
 
         # ── 路径 B: 多查询扩展 + RRF ──
-        all_results = self._retrieve_parallel(query, weights, limit, expand, scale=retrieve_scale)
+        all_results = self._retrieve_parallel(query, weights, limit, expand, scale=retrieve_scale, graph_parallel=graph_parallel)
         fused = self._weighted_rrf_fusion(all_results)
         output: List[Dict] = []
         seen_ids = set()

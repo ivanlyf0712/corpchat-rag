@@ -76,7 +76,7 @@ def _build_test_index():
     return embeddings
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def embeddings():
     return _build_test_index()
 

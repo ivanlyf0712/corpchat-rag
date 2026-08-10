@@ -76,14 +76,14 @@ def _build_test_index(tmp_path):
     return idx_path
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def test_index(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("corpchat_rerank")
     idx = _build_test_index(tmp)
     yield idx
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def embeddings(test_index):
     embeddings = txtai.Embeddings()
     embeddings.load(test_index)

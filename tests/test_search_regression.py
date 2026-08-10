@@ -78,7 +78,7 @@ def _build_test_index(tmp_path):
     return idx_path
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def test_index(tmp_path_factory):
     """Session-scoped deterministic index."""
     tmp = tmp_path_factory.mktemp("corpchat")
@@ -86,7 +86,7 @@ def test_index(tmp_path_factory):
     yield idx
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def searcher(test_index):
     embeddings = txtai.Embeddings()
     embeddings.load(test_index)

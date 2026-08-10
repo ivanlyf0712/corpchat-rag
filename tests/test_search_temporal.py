@@ -101,12 +101,12 @@ def _build_temporal_index(tmp_path):
     return idx_path
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def temporal_index(tmp_path_factory):
     return _build_temporal_index(tmp_path_factory.mktemp("temporal"))
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def searcher(temporal_index):
     embeddings = txtai.Embeddings()
     embeddings.load(temporal_index)
