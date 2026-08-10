@@ -4,9 +4,22 @@ CorpChat Search — Reranker
 Cross-encoder reranking for improved result relevance.
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .config import DEFAULT_RERANKER_MODEL, DEFAULT_RERANK_TOP_N, logger
+
+
+# 进程级 CrossEncoder 缓存: 交叉编码器模型只加载一次, 避免每次搜索都重载
+_CROSS_ENCODER_CACHE: Dict[str, Any] = {}
+
+
+def _load_cross_encoder(model_name: str) -> Any:
+    """Load (and cache) a CrossEncoder by model name."""
+    if model_name not in _CROSS_ENCODER_CACHE:
+        from sentence_transformers import CrossEncoder
+        logger.info(f"加载交叉编码器: {model_name}")
+        _CROSS_ENCODER_CACHE[model_name] = CrossEncoder(model_name)
+    return _CROSS_ENCODER_CACHE[model_name]
 
 
 class Reranker:
@@ -26,9 +39,7 @@ class Reranker:
 
     def _ensure_model(self) -> None:
         if self.model is None and self.enabled:
-            from sentence_transformers import CrossEncoder
-            logger.info(f"加载交叉编码器: {self.model_name}")
-            self.model = CrossEncoder(self.model_name)
+            self.model = _load_cross_encoder(self.model_name)
 
     def rerank(self, query: str, results: List[Dict]) -> List[Dict]:
         if not self.enabled or not results:

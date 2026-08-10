@@ -140,15 +140,16 @@ class TestGreetingHandling:
         assert "search_messages" in names
 
     def test_quick_respond_llm_classifies_greeting(self, monkeypatch):
-        """LLM drives greeting intent when available."""
+        """LLM drives greeting intent when available (ambiguous query only)."""
         agent = self._agent(api_base="http://fake", api_key="k")
         seen = []
         monkeypatch.setattr(agent, "_check_llm", lambda: True)
         monkeypatch.setattr(agent, "_llm_classify_intent",
                             lambda u: seen.append(u) or "greeting")
         monkeypatch.setattr(agent, "_generate_greeting", lambda u, lang: "LLM GREETING")
-        assert agent._quick_respond("how are you?") == "LLM GREETING"
-        assert seen == ["how are you?"]
+        # 规则未命中的非典型问候 → 走 LLM 分类
+        assert agent._quick_respond("how is everything going my good friend today") == "LLM GREETING"
+        assert seen == ["how is everything going my good friend today"]
 
     def test_quick_respond_llm_generates_greeting(self, monkeypatch):
         """Greeting answer comes from the LLM, not the preset string."""

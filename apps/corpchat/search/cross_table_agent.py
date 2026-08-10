@@ -511,37 +511,40 @@ class CrossTableAgent:
     def _quick_respond(self, user_input: str) -> Optional[str]:
         """Handle greetings and system questions without invoking tools.
 
-        LLM-first intent classification when the LLM is reachable:
-          greeting → LLM-generated greeting response
+        Rule-first fast path (keyword gates are <1ms):
+          greeting → LLM-generated greeting response (or preset if LLM down)
           system   → self-description
           search   → proceed to tool routing
 
-        Falls back to keyword rules with preset replies when the LLM is down.
-        A cheap keyword gate skips the LLM round-trip for obvious search
-        queries, so search latency is unchanged.
+        The LLM intent classification runs ONLY for ambiguous queries that
+        no rule matched — known greetings/system and obvious searches never
+        pay an extra LLM round-trip (keeps search latency low).
         """
         q = user_input.lower().strip()
         lang = self._detect_language(user_input)
+        llm_ok = self._check_llm()
 
-        # Fast gate: clearly a search query -> skip the LLM classify round-trip
+        # Fast keyword gates FIRST — known greetings never pay an LLM classify
+        if _is_greeting_query(q):
+            if llm_ok:
+                return self._generate_greeting(user_input, lang)
+            return self._PRESET_GREETING_EN if lang == "en" else self._PRESET_GREETING_ZH
+        if any(kw in q for kw in _SYSTEM_KEYWORDS):
+            return self._system_info_text(lang)
+
+        # Clearly a search query → proceed to tool routing (no LLM classify)
         if self._rule_search_hint(q):
             return None
 
-        if self._check_llm():
+        # Ambiguous query → LLM intent classification (bounded timeout)
+        if llm_ok:
             intent = self._llm_classify_intent(user_input)
             if intent == "greeting":
                 return self._generate_greeting(user_input, lang)
             if intent == "system":
                 return self._system_info_text(lang)
-            if intent == "search":
-                return None
-            # LLM returned nothing usable -> fall through to keyword rules
+            # "search" or None → proceed to search
 
-        # Keyword rules (LLM down, or LLM classification produced nothing)
-        if _is_greeting_query(q):
-            return self._PRESET_GREETING_EN if lang == "en" else self._PRESET_GREETING_ZH
-        if any(kw in q for kw in _SYSTEM_KEYWORDS):
-            return self._system_info_text(lang)
         return None
 
     # -- Preset replies -- used ONLY when the LLM is unavailable -----

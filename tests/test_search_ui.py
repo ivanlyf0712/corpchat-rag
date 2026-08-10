@@ -739,6 +739,21 @@ def test_memory_graph_empty_state_no_iframe(monkeypatch):
     assert not _recorder.iframes, "empty graph should not render an iframe"
 
 
+def test_memory_graph_capped_for_large_graphs():
+    """大图谱按连接度截断 (≤40 节点 / ≤80 边), 控制浏览器渲染成本。"""
+    nodes = [{"id": f"n{i}", "type": "person" if i % 2 else "message", "label": f"n{i}"}
+             for i in range(60)]
+    edges = [{"source": f"n{i}", "target": f"n{(i + 1) % 60}"} for i in range(60)]
+    edges += [{"source": "n0", "target": f"n{i}"} for i in range(1, 60)]
+
+    kept_nodes, kept_edges = app_module._cap_graph(nodes, edges, max_nodes=40, max_edges=80)
+
+    assert len(kept_nodes) <= 40, f"nodes not capped: {len(kept_nodes)}"
+    assert len(kept_edges) <= 80, f"edges not capped: {len(kept_edges)}"
+    # 实体节点 (person) 优先保留
+    assert any(n["type"] == "person" for n in kept_nodes)
+
+
 def test_editing_mode_replaces_chat_panel(monkeypatch):
     """编辑模式: 配置面板替代聊天面板 (聊天历史不渲染, 图谱在配置底部)。"""
     from streamlit import session_state as ss

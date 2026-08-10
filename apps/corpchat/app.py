@@ -528,6 +528,31 @@ def _constellation_html(nodes: list, edges: list, height: int = 380) -> str:
             .replace("__HEIGHT__", str(height)))
 
 
+def _cap_graph(nodes: list, edges: list, max_nodes: int = 40, max_edges: int = 80):
+    """按连接度截断图谱, 限制浏览器端渲染成本。
+
+    优先保留实体节点 (person/company/label/keyword) 和高连接度节点;
+    边按两端节点度数之和排序截断。
+    """
+    from collections import Counter
+    degree = Counter()
+    for e in edges:
+        degree[e["source"]] += 1
+        degree[e["target"]] += 1
+
+    def _sort_key(n):
+        return (1 if n.get("type") == "message" else 0, -degree.get(n["id"], 0))
+
+    keep = sorted(nodes, key=_sort_key)[:max_nodes]
+    keep_ids = {n["id"] for n in keep}
+    kept_edges = [e for e in edges if e["source"] in keep_ids and e["target"] in keep_ids]
+    if len(kept_edges) > max_edges:
+        kept_edges.sort(key=lambda e: degree.get(e["source"], 0) + degree.get(e["target"], 0),
+                        reverse=True)
+        kept_edges = kept_edges[:max_edges]
+    return keep, kept_edges
+
+
 def _render_memory_graph(cfg: dict):
     """渲染 Hindsight 星座视图 (实体关系图)。
 
@@ -566,6 +591,10 @@ def _render_memory_graph(cfg: dict):
         if not nodes:
             st.caption("沒有可繪製的實體 (試著搜尋更多消息)。")
             return
+
+        # 截断大图, 控制浏览器渲染成本 (实体节点优先, 高连接度优先)
+        if len(nodes) > 40 or len(edges) > 80:
+            nodes, edges = _cap_graph(nodes, edges)
 
         # 自包含力导向星座图 (st.iframe srcdoc, JS 隔离运行)
         st.iframe(_constellation_html(nodes, edges), height=400)
