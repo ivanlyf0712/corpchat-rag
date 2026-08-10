@@ -296,6 +296,68 @@ def save_agent_config(session_id: str, config: dict):
         conn.close()
 
 
+# ── Hindsight memory graph persistence ────────────────────────────
+def init_memory_graph_table():
+    """Create memory_graph table if it doesn't exist."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS memory_graph (
+                session_id VARCHAR(64) PRIMARY KEY,
+                graph TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def load_memory_graph(session_id: str):
+    """Load the memory graph JSON for a session, or None if unset."""
+    import json
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT graph FROM memory_graph WHERE session_id = %s", (session_id,))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        return json.loads(row[0])
+    except Exception:
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def save_memory_graph(session_id: str, graph: dict):
+    """Upsert the memory graph JSON for a session."""
+    import json
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO memory_graph (session_id, graph)
+            VALUES (%s, %s)
+            ON CONFLICT (session_id) DO UPDATE SET
+                graph = EXCLUDED.graph,
+                updated_at = NOW()
+        """, (session_id, json.dumps(graph, ensure_ascii=False)))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
 
 def search_similar(query, vendor_filter=None, top_k=5,
                    date_from=None, date_to=None, amount_min=None, amount_max=None,

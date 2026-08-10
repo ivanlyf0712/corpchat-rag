@@ -397,6 +397,77 @@ def _persist_agent_config(cfg=None):
     except Exception:
         pass
 
+
+def _node_color(node: dict) -> str:
+    """图谱节点配色 (按类型); 高亮(风险)节点用红色。"""
+    if node.get("highlighted"):
+        return "#f85149"
+    return {
+        "person": "#58a6ff",
+        "company": "#f78166",
+        "label": "#3fb950",
+        "keyword": "#d29922",
+        "message": "#8b949e",
+    }.get(node["type"], "#8b949e")
+
+
+def _render_memory_graph(cfg: dict):
+    """渲染 Hindsight 星座视图 (实体关系图)。
+
+    数据源: 会话聊天历史的检索结果 (raw_hits) + 对话记忆。
+    联动: 高怀疑度 → 风险标签高亮; 数据源 → 实体过滤; 点击节点 → 回填搜索框。
+    整个渲染 try/except 兜底 —— 图谱故障不应破坏搜索 UI。
+    """
+    try:
+        from apps.corpchat.search.memory_graph import build_entity_graph
+        from streamlit_agraph import Config, Edge, Node, agraph
+
+        # 图谱数据: 会话历史中各轮检索结果 (含结构化 metadata)
+        graph_messages = []
+        for turn in st.session_state.get("chat_history", []):
+            hits = turn.get("raw_hits") or []
+            if isinstance(hits, list):
+                graph_messages.extend(h for h in hits if isinstance(h, dict))
+
+        if not graph_messages:
+            st.caption("進行搜索後, 記憶圖譜將在此顯示實體關係。")
+            return
+
+        # 联动 1: 高怀疑度 (>=7) → 风险标签高亮
+        risk = set()
+        if cfg["persona"].get("skepticism", 5) >= 7:
+            risk = {"old_friend_reconnect", "詐騙", "fraud"}
+
+        graph = build_entity_graph(
+            messages=graph_messages,
+            sources=cfg["knowledge"].get("sources", ["messages", "contacts"]),
+            risk_labels=risk,
+        )
+
+        nodes = [
+            Node(id=n["id"], label=n["label"], size=int(n["size"]), color=_node_color(n))
+            for n in graph["nodes"]
+        ]
+        edges = [
+            Edge(source=e["source"], target=e["target"], label=e["label"])
+            for e in graph["edges"]
+        ]
+        config = Config(
+            width=460, height=420, directed=False, physics=True,
+            nodeHighlightBehavior=True, highlightColor="#F7A7A6", collapsible=True,
+        )
+
+        # 联动 3: 点击节点 → 回填搜索框
+        clicked = agraph(nodes=nodes, edges=edges, config=config)
+        if clicked:
+            st.session_state.search_query = str(clicked)
+            st.info(f"已填入搜索框: {clicked}")
+
+        # 联动 2 (展示): 数据源门控已在 build_entity_graph(sources=...) 生效
+        st.caption(f"節點 {len(nodes)} · 邊 {len(edges)} · 數據源 {cfg['knowledge'].get('sources')}")
+    except Exception as e:
+        st.caption(f"記憶圖譜渲染失敗: {e}")
+
 def _build_agent_process_payload(tool_calls: list, steps: list, turn: dict) -> dict:
     """Backward-compatible wrapper for the Process-window payload builder."""
     return _process_window.build_agent_process_payload(tool_calls, turn)
@@ -508,6 +579,9 @@ def _render_search_page():
                 cfg["knowledge"]["citations"] = st.checkbox(
                     "引用來源", value=cfg["knowledge"].get("citations", False),
                     help="答案附帶來源", disabled=st.session_state.searching)
+
+            with st.expander("🕸️ 記憶圖譜", expanded=False):
+                _render_memory_graph(cfg)
 
         # ── 派生局部变量 (供下游搜索/agent 使用; 即时生效) ──
         st.session_state.agent_config = cfg
