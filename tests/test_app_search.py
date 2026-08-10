@@ -111,7 +111,8 @@ def _make_fake_streamlit():
     st.checkbox = lambda *a, **k: True
     st.radio = lambda *a, **k: (a[1][0] if len(a) > 1 and a[1] else None)
     st.selectbox = lambda *a, **k: (a[1][0] if len(a) > 1 and a[1] else None)
-    st.text_input = lambda *a, **k: ""
+    st.text_input = lambda *a, **k: k.get("value", "")
+    st.multiselect = lambda *a, **k: k.get("default", [])
     st.chat_input = lambda *a, **k: None
     st.number_input = lambda *a, **k: 1
     st.slider = lambda *a, **k: 10

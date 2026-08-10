@@ -36,7 +36,15 @@ from apps.corpchat.search import (
     LiteLLMClient,
     SearchRouter,
 )
-
+from apps.corpchat.search.agent_config import (
+    PRESET_LABELS,
+    STYLE_LABELS,
+    apply_preset,
+    default_agent_config,
+    persona_to_profile_dict,
+    preset_index,
+    style_index,
+)
 # ── Shared Process-window rendering helpers (kept out of app.py) ──
 from apps.corpchat import process_window as _process_window
 
@@ -63,6 +71,13 @@ except Exception:
 try:
     from core.db import init_disposition_profiles_table
     init_disposition_profiles_table()
+except Exception:
+    pass
+
+# ── Initialize DB-backed unified agent config table ──
+try:
+    from core.db import init_agent_config_table
+    init_agent_config_table()
 except Exception:
     pass
 
@@ -360,24 +375,24 @@ def _check_llm_available() -> bool:
 
 
 def _load_persona_profile():
-    """Load the current session's DispositionProfile (persona) or None (neutral)."""
+    """从 agent_config 构建当前会话的 DispositionProfile (0-10 → 0-1), 无则 None。"""
     try:
         from apps.corpchat.search.persona import DispositionProfile
-        data = st.session_state.get("persona")
-        if data:
-            return DispositionProfile.from_dict(data)
+        cfg = st.session_state.get("agent_config")
+        if cfg and cfg.get("persona"):
+            return DispositionProfile.from_dict(persona_to_profile_dict(cfg["persona"]))
     except Exception:
         pass
     return None
 
 
-def _persist_persona():
-    """Persist the session persona to the DB (best-effort, non-fatal)."""
+def _persist_agent_config(cfg=None):
+    """把统一 agent 配置持久化到 DB (best-effort, non-fatal)。"""
     try:
-        from core.db import save_disposition_profile
-        data = st.session_state.get("persona")
-        if data:
-            save_disposition_profile(st.session_state.get("session_id", "default"), data)
+        from core.db import save_agent_config
+        cfg = cfg if cfg is not None else st.session_state.get("agent_config")
+        if cfg:
+            save_agent_config(st.session_state.get("session_id", "default"), cfg)
     except Exception:
         pass
 
@@ -432,41 +447,77 @@ def _render_search_page():
     chat_col, ctrl_col = st.columns([3, 1])
 
     with ctrl_col:
-        with st.expander("Enhancements", expanded=False):
-            use_rerank = st.checkbox("Reranker", value=True, help="Cross-encoder reranking", disabled=st.session_state.searching)
-            expand = st.checkbox("LLM expansion", value=True, help="Expand query via LiteLLM", disabled=st.session_state.searching)
-            graph_expand = st.slider("Graph hops", min_value=0, max_value=3, value=1, disabled=st.session_state.searching)
-            graph_parallel = st.checkbox(
-                "Graph path", value=False,
-                help="Graph traversal as a fusion path (relationship queries)",
-                disabled=st.session_state.searching,
-            )
-            # Persist agent toggle across reruns (default: activated)
-            if "agent_enabled" not in st.session_state:
-                st.session_state.agent_enabled = True
+        # ── 🎛️ 配置代理: 单一入口, 即时生效, 会话级持久化 ──
+        cfg = st.session_state.get("agent_config") or default_agent_config()
 
-            agent_enabled = st.checkbox(
-                "🤖 Agent",
-                value=st.session_state.agent_enabled,
-                key="agent_cb",
-                help="Unified agent: cross-table reasoning + smart search",
-                disabled=st.session_state.searching,
-            )
-            st.session_state.agent_enabled = agent_enabled
-        with st.expander("Filters", expanded=False):
-            label_filter = st.text_input("Label filter", value="", help="e.g. quotation_request", disabled=st.session_state.searching)
-            top_k = st.slider("Top-k", min_value=1, max_value=20, value=5, disabled=st.session_state.searching)
-        with st.expander("Persona", expanded=False):
-            persona_skepticism = st.slider("懷疑度", 0, 10, 5, help="對證據不足的結論標註不確定性", disabled=st.session_state.searching)
-            persona_literality = st.slider("字面性", 0, 10, 5, help="嚴格依據檢索原文回答", disabled=st.session_state.searching)
-            persona_empathy = st.slider("共情度", 0, 10, 5, help="先回應情緒再給信息", disabled=st.session_state.searching)
-            persona_style = st.selectbox("風格", ["balanced", "concise", "detailed"], disabled=st.session_state.searching)
-            st.session_state.persona = {
-                "skepticism": persona_skepticism / 10.0,
-                "literality": persona_literality / 10.0,
-                "empathy": persona_empathy / 10.0,
-                "style": persona_style,
-            }
+        with st.expander("🎛️ 配置代理", expanded=False):
+            with st.expander("🧠 人格特質 (CARA)", expanded=False):
+                preset_label = st.selectbox(
+                    "預設模式", list(PRESET_LABELS.keys()),
+                    index=preset_index(cfg["persona"].get("preset", "custom")),
+                    disabled=st.session_state.searching,
+                )
+                apply_preset(cfg, preset_label)
+                cfg["persona"]["skepticism"] = st.slider(
+                    "懷疑度", 0, 10, int(cfg["persona"].get("skepticism", 5)),
+                    help="對證據不足的結論標註不確定性", disabled=st.session_state.searching)
+                cfg["persona"]["literality"] = st.slider(
+                    "字面性", 0, 10, int(cfg["persona"].get("literality", 5)),
+                    help="嚴格依據檢索原文回答", disabled=st.session_state.searching)
+                cfg["persona"]["empathy"] = st.slider(
+                    "共情度", 0, 10, int(cfg["persona"].get("empathy", 5)),
+                    help="先回應情緒再給信息", disabled=st.session_state.searching)
+                style_label = st.selectbox(
+                    "回答長度", list(STYLE_LABELS.keys()),
+                    index=style_index(cfg["persona"].get("style", "standard")),
+                    disabled=st.session_state.searching)
+                cfg["persona"]["style"] = STYLE_LABELS[style_label]
+
+            with st.expander("⚙️ 搜索策略", expanded=False):
+                depth_label = st.selectbox(
+                    "檢索深度", ["简单", "深度"],
+                    index=0 if cfg["search"].get("depth", "deep") == "simple" else 1,
+                    help="简单=单步检索; 深度=跨表多步推理",
+                    disabled=st.session_state.searching)
+                cfg["search"]["depth"] = "simple" if depth_label == "简单" else "deep"
+                cfg["search"]["expand"] = st.checkbox(
+                    "查詢擴展", value=cfg["search"].get("expand", True),
+                    help="LLM 语义重写 + 关键词", disabled=st.session_state.searching)
+                cfg["search"]["rerank"] = st.checkbox(
+                    "重排序", value=cfg["search"].get("rerank", True),
+                    help="交叉编码器重排", disabled=st.session_state.searching)
+                cfg["search"]["graph_hops"] = st.slider(
+                    "Graph hops", 0, 3, int(cfg["search"].get("graph_hops", 1)),
+                    disabled=st.session_state.searching)
+                cfg["search"]["graph_parallel"] = st.checkbox(
+                    "Graph path", value=cfg["search"].get("graph_parallel", False),
+                    help="圖遍歷作為融合路 (關係查詢)", disabled=st.session_state.searching)
+                cfg["search"]["top_k"] = st.slider(
+                    "Top-k", 1, 20, int(cfg["search"].get("top_k", 5)),
+                    disabled=st.session_state.searching)
+                cfg["search"]["label_filter"] = st.text_input(
+                    "Label filter", value=cfg["search"].get("label_filter", ""),
+                    help="e.g. quotation_request", disabled=st.session_state.searching)
+
+            with st.expander("📚 知識範圍", expanded=False):
+                cfg["knowledge"]["sources"] = st.multiselect(
+                    "數據源", ["消息", "联系人"],
+                    default=cfg["knowledge"].get("sources", ["messages", "contacts"]),
+                    disabled=st.session_state.searching)
+                cfg["knowledge"]["citations"] = st.checkbox(
+                    "引用來源", value=cfg["knowledge"].get("citations", False),
+                    help="答案附帶來源", disabled=st.session_state.searching)
+
+        # ── 派生局部变量 (供下游搜索/agent 使用; 即时生效) ──
+        st.session_state.agent_config = cfg
+        expand = cfg["search"]["expand"]
+        use_rerank = cfg["search"]["rerank"]
+        graph_expand = cfg["search"]["graph_hops"]
+        graph_parallel = cfg["search"]["graph_parallel"]
+        top_k = cfg["search"]["top_k"]
+        label_filter = cfg["search"]["label_filter"]
+        agent_enabled = (cfg["search"]["depth"] == "deep")
+        st.session_state.agent_enabled = agent_enabled
 
     with chat_col:
         _render_chat_history(st.session_state.chat_history)
@@ -548,7 +599,7 @@ def _render_search_page():
                 agent.session_id = st.session_state.session_id
 
             # ── Persona: persist & load the tuned disposition profile ──
-            _persist_persona()
+            _persist_agent_config()
             profile = _load_persona_profile()
 
             # ── Unified Agent mode ──

@@ -234,6 +234,68 @@ def save_disposition_profile(session_id: str, profile: dict):
         conn.close()
 
 
+# ── Unified agent config persistence ───────────────────────────────
+def init_agent_config_table():
+    """Create agent_config table if it doesn't exist."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agent_config (
+                session_id VARCHAR(64) PRIMARY KEY,
+                config TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def load_agent_config(session_id: str):
+    """Load the unified agent config JSON for a session, or None if unset."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT config FROM agent_config WHERE session_id = %s", (session_id,))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        import json
+        return json.loads(row[0])
+    except Exception:
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def save_agent_config(session_id: str, config: dict):
+    """Upsert the unified agent config JSON for a session."""
+    import json
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO agent_config (session_id, config)
+            VALUES (%s, %s)
+            ON CONFLICT (session_id) DO UPDATE SET
+                config = EXCLUDED.config,
+                updated_at = NOW()
+        """, (session_id, json.dumps(config, ensure_ascii=False)))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
 
 def search_similar(query, vendor_filter=None, top_k=5,
                    date_from=None, date_to=None, amount_min=None, amount_max=None,

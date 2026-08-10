@@ -6,16 +6,17 @@
 
 **Status:** ready-for-agent
 
-- [ ] `st.session_state.agent_config` 单一结构（persona/search/knowledge），render 即时读取
-- [ ] CARA 预设表（审计/客服/研究助理）→ 一键写三值 + style；"自訂"保留滑杆覆盖
-- [ ] 回答长度 select（简洁/标准/详细）→ `persona.style`（concise/standard/detailed）
-- [ ] 检索深度 select（简单/深度）→ 简单=非 agent 单步；深度=`agent_enabled=True`（CrossTableAgent）
-- [ ] `agent_config` 表 + `load_agent_config`/`save_agent_config`（core/db.py，镜像 disposition_profiles）
-- [ ] `_load_agent_config`（启动/session 切换恢复）/ `_persist_agent_config`（render 或 turn 完成时）
-- [ ] 面板默认值 = 现有行为（depth=deep, expand=True, rerank=True, graph_hops=1）
-- [ ] 测试: 预设映射、滑杆/10、回答长度映射、深度→agent_enabled、持久化 round-trip、刷新恢复、全量回归绿
+- [x] `st.session_state.agent_config` 单一结构（persona/search/knowledge），render 即时读取
+- [x] CARA 预设表（审计/客服/研究助理）→ 一键写三值 + style；"自訂"保留滑杆覆盖
+- [x] 回答长度 select（简洁/标准/详细）→ `persona.style`（concise/standard/detailed）
+- [x] 检索深度 select（简单/深度）→ 简单=非 agent 单步；深度=`agent_enabled=True`（CrossTableAgent）
+- [x] `agent_config` 表 + `load_agent_config`/`save_agent_config`（core/db.py，镜像 disposition_profiles）
+- [x] `_load_agent_config`（启动/session 切换恢复）/ `_persist_agent_config`（render 或 turn 完成时）
+- [x] 面板默认值 = 现有行为（depth=deep, expand=True, rerank=True, graph_hops=1）
+- [x] 测试: 预设映射、滑杆/10、回答长度映射、深度→agent_enabled、持久化 round-trip、刷新恢复、全量回归绿
 
 ## Comments
 
 - Spec: `.scratch/agent-config-panel/spec.md`
 - 复用: persona 面板（`DispositionProfile`）、Enhancements/Filters 控件、`AgenticDecider`
+- Implemented & verified on branch feature/hindsight-multipath-rrf-skeleton; full suite 160 passed.

@@ -109,7 +109,8 @@ def _make_fake_streamlit(recorder: _Recorder, search_impl=None):
     st.checkbox = lambda *a, **k: k.get("value", True)
     st.radio = lambda *a, **k: (a[1][0] if len(a) > 1 and a[1] else None)
     st.selectbox = lambda *a, **k: (a[1][0] if len(a) > 1 and a[1] else None)
-    st.text_input = lambda *a, **k: ""
+    st.text_input = lambda *a, **k: k.get("value", "")
+    st.multiselect = lambda *a, **k: k.get("default", [])
     st.chat_input = lambda *a, **k: None
     st.number_input = lambda *a, **k: 1
     st.slider = lambda *a, **k: 10
@@ -389,6 +390,24 @@ def test_search_query_still_calls_search(monkeypatch):
     app_module._render_search_page()
 
     assert len(calls) == 1, f"Search query did not reach _run_search: {calls}"
+
+
+# ── Ticket 01: unified config panel ──────────────────────────────
+def test_config_panel_writes_session_config(monkeypatch):
+    """配置代理面板把值写入 agent_config 并派生 agent_enabled (深度→agent)。"""
+    from streamlit import session_state as ss
+    ss["chat_history"] = []
+    ss["searching"] = False
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+
+    app_module._render_search_page()
+
+    cfg = ss.get("agent_config")
+    assert cfg is not None, "面板应写入 session_state.agent_config"
+    assert {"persona", "search", "knowledge"} <= set(cfg.keys())
+    # fake selectbox 返回第一项 "简单" → depth=simple → agent_enabled=False
+    assert cfg["search"]["depth"] == "simple"
+    assert ss["agent_enabled"] is False
 
 # ── Ticket 03: Unified Process window ─────────────────────────────
 def test_process_window_single_expander_agentic(monkeypatch):
