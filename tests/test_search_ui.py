@@ -754,6 +754,24 @@ def test_memory_graph_capped_for_large_graphs():
     assert any(n["type"] == "person" for n in kept_nodes)
 
 
+def test_graph_not_rendered_in_chat_mode(monkeypatch):
+    """搜索面板 (聊天模式) 不渲染图谱 — 图谱只在配置页 (编辑模式) 底部。"""
+    from streamlit import session_state as ss
+    ss["settings_open"] = False
+    ss["chat_history"] = [{
+        "query": "物流報價", "answer": "ok", "status": "done",
+        "raw_hits": [{"id": "m1", "text": "合同已签 物流报价", "score": 0.9,
+                      "metadata": {"customer_name": "高健銘", "company": "DCH",
+                                   "label": "old_friend_reconnect", "open_kfid": "k1"}}],
+    }]
+    ss["searching"] = False
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+
+    app_module._render_search_page()
+
+    assert not _recorder.iframes, "chat mode must not render the memory graph"
+
+
 def test_editing_mode_replaces_chat_panel(monkeypatch):
     """编辑模式: 配置面板替代聊天面板 (聊天历史不渲染, 图谱在配置底部)。"""
     from streamlit import session_state as ss

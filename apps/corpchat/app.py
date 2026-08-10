@@ -124,6 +124,9 @@ h1 { border-bottom: 2px solid #30363d; padding-bottom: 0.3em; }
 .stChatInput { border-top: 1px solid #30363d; }
 @keyframes stageFadeIn { from { opacity: 0; transform: translateX(-8px); } to { opacity: 1; transform: none; } }
 @keyframes stageFadeOut { from { opacity: 1; } to { opacity: 0; } }
+/* 设置面板: 打开时从上方滑入 */
+@keyframes settingsSlideDown { from { opacity: 0; transform: translateY(-14px); } to { opacity: 1; transform: translateY(0); } }
+[data-testid="stVerticalBlockBorderWrapper"] { animation: settingsSlideDown 0.28s ease; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -729,8 +732,6 @@ def _render_settings_panel(cfg: dict):
 
 def _render_search_page():
     """Render the Search page (kept callable so tests can drive it)."""
-    st.title("Search")
-
     # Initialize session state
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
@@ -752,6 +753,8 @@ def _render_search_page():
         st.session_state.settings_open = False
     settings_open = st.session_state.get("settings_open", False)
 
+    st.title("⚙️ Settings" if settings_open else "Search")
+
     # ── 派生局部变量 (供下游搜索/agent 使用; 即时生效) ──
     st.session_state.agent_config = cfg
     expand = cfg["search"]["expand"]
@@ -763,16 +766,14 @@ def _render_search_page():
     agent_enabled = (cfg["search"]["depth"] == "deep")
     st.session_state.agent_enabled = agent_enabled
 
-    # ── 布局: 编辑模式 → 配置面板替代聊天面板 (图谱在底部) ──
+    # ── 布局: 编辑模式 → 配置面板替代聊天面板 (图谱在配置底部) ──
     if settings_open:
-        _render_settings_panel(cfg)
+        with st.container(key="settings_panel", border=True):
+            _render_settings_panel(cfg)
         st.divider()
         st.markdown("#### 🕸️ 記憶圖譜")
         _render_memory_graph(cfg)
     else:
-        # 记忆图谱 (星座视图): 有检索结果时显示在聊天区上方
-        _render_memory_graph(cfg)
-
         _render_chat_history(st.session_state.chat_history)
 
         # If there's a pending processing turn, handle it now
