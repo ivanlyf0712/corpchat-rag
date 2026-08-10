@@ -12,6 +12,7 @@ import requests
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
+from typing import Any, Optional
 
 # ── Ensure the project root is on the Python path ──
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
@@ -55,6 +56,13 @@ _intent_classifier = IntentClassifier()
 try:
     from core.db import init_agent_memory_table
     init_agent_memory_table()
+except Exception:
+    pass
+
+# ── Initialize DB-backed disposition profiles table (persona) ──
+try:
+    from core.db import init_disposition_profiles_table
+    init_disposition_profiles_table()
 except Exception:
     pass
 
@@ -292,13 +300,20 @@ def search_messages(
         return []
 
 # ═══════════════════════════════════ LiteLLM helper ════════════════════════════════════
-def generate_answer_litellm(query: str, context: str) -> str:
+def generate_answer_litellm(query: str, context: str, profile: Optional[Any] = None) -> str:
     if not LITELLM_API_KEY:
         return "LiteLLM API key not configured. Set LITELLM_API_KEY in .env."
+    system_content = (
+        "You are a helpful assistant answering questions based on retrieved chat messages. "
+        "Answer concisely in the same language as the query. "
+        "If the context doesn't contain the answer, say so."
+    )
+    if profile is not None:
+        system_content = profile.build_system_prompt(system_content)
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful assistant answering questions based on retrieved chat messages. Answer concisely in the same language as the query. If the context doesn't contain the answer, say so."
+            "content": system_content,
         },
         {
             "role": "user",
@@ -342,6 +357,29 @@ def _run_search(query: str, top_k: int, use_rerank: bool, expand: bool, graph_ex
 def _check_llm_available() -> bool:
     """Quick check if LiteLLM is reachable."""
     return _llm_client.is_available(timeout=5)
+
+
+def _load_persona_profile():
+    """Load the current session's DispositionProfile (persona) or None (neutral)."""
+    try:
+        from apps.corpchat.search.persona import DispositionProfile
+        data = st.session_state.get("persona")
+        if data:
+            return DispositionProfile.from_dict(data)
+    except Exception:
+        pass
+    return None
+
+
+def _persist_persona():
+    """Persist the session persona to the DB (best-effort, non-fatal)."""
+    try:
+        from core.db import save_disposition_profile
+        data = st.session_state.get("persona")
+        if data:
+            save_disposition_profile(st.session_state.get("session_id", "default"), data)
+    except Exception:
+        pass
 
 def _build_agent_process_payload(tool_calls: list, steps: list, turn: dict) -> dict:
     """Backward-compatible wrapper for the Process-window payload builder."""
@@ -418,6 +456,17 @@ def _render_search_page():
         with st.expander("Filters", expanded=False):
             label_filter = st.text_input("Label filter", value="", help="e.g. quotation_request", disabled=st.session_state.searching)
             top_k = st.slider("Top-k", min_value=1, max_value=20, value=5, disabled=st.session_state.searching)
+        with st.expander("Persona", expanded=False):
+            persona_skepticism = st.slider("懷疑度", 0, 10, 5, help="對證據不足的結論標註不確定性", disabled=st.session_state.searching)
+            persona_literality = st.slider("字面性", 0, 10, 5, help="嚴格依據檢索原文回答", disabled=st.session_state.searching)
+            persona_empathy = st.slider("共情度", 0, 10, 5, help="先回應情緒再給信息", disabled=st.session_state.searching)
+            persona_style = st.selectbox("風格", ["balanced", "concise", "detailed"], disabled=st.session_state.searching)
+            st.session_state.persona = {
+                "skepticism": persona_skepticism / 10.0,
+                "literality": persona_literality / 10.0,
+                "empathy": persona_empathy / 10.0,
+                "style": persona_style,
+            }
 
     with chat_col:
         _render_chat_history(st.session_state.chat_history)
@@ -498,6 +547,10 @@ def _render_search_page():
             else:
                 agent.session_id = st.session_state.session_id
 
+            # ── Persona: persist & load the tuned disposition profile ──
+            _persist_persona()
+            profile = _load_persona_profile()
+
             # ── Unified Agent mode ──
             if agent_enabled:
                 with st.chat_message("assistant"):
@@ -519,6 +572,7 @@ def _render_search_page():
                                 expand=expand,
                                 use_rerank=use_rerank,
                                 graph_parallel=graph_parallel,
+                                profile=profile,
                             )
                             result = ct_agent.process(query, on_stage=_on_stage)
                             answer = result["output"]
@@ -555,6 +609,7 @@ def _render_search_page():
                 label_filter=label_filter or None,
                 search_mode="hybrid",
                 graph_parallel=graph_parallel,
+                profile=profile,
             )
             raw_hits = search_results if isinstance(search_results, list) else []
 
@@ -664,7 +719,7 @@ def _render_search_page():
                     context = "\n---\n".join(context_parts) if context_parts else "No relevant context found."
 
                     if llm_ok:
-                        answer = generate_answer_litellm(query, context)
+                        answer = generate_answer_litellm(query, context, profile=profile)
                     else:
                         answer = "LLM is unavailable. Here are the retrieved messages:\n\n" + "\n\n---\n\n".join(context_parts[:3])
                     _complete_stage(slot, "6/6 generating answer...")

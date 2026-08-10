@@ -150,6 +150,91 @@ def save_agent_memory(session_id: str, turn_number: int, user_message: str, bot_
         conn.close()
 
 
+# ── Persona disposition profile persistence ─────────────────────────
+def init_disposition_profiles_table():
+    """Create disposition_profiles table if it doesn't exist."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS disposition_profiles (
+                session_id VARCHAR(64) PRIMARY KEY,
+                skepticism REAL DEFAULT 0.5,
+                literality REAL DEFAULT 0.5,
+                empathy REAL DEFAULT 0.5,
+                style VARCHAR(16) DEFAULT 'balanced',
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def load_disposition_profile(session_id: str):
+    """Load a disposition profile for a session, or None if not set.
+
+    Returns a dict with keys skepticism / literality / empathy / style.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT skepticism, literality, empathy, style
+            FROM disposition_profiles
+            WHERE session_id = %s
+        """, (session_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "skepticism": float(row[0]),
+            "literality": float(row[1]),
+            "empathy": float(row[2]),
+            "style": row[3],
+        }
+    except Exception:
+        return None
+    finally:
+        cur.close()
+        conn.close()
+
+
+def save_disposition_profile(session_id: str, profile: dict):
+    """Upsert a disposition profile for a session."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO disposition_profiles (session_id, skepticism, literality, empathy, style)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (session_id) DO UPDATE SET
+                skepticism = EXCLUDED.skepticism,
+                literality = EXCLUDED.literality,
+                empathy = EXCLUDED.empathy,
+                style = EXCLUDED.style,
+                updated_at = NOW()
+        """, (
+            session_id,
+            float(profile.get("skepticism", 0.5)),
+            float(profile.get("literality", 0.5)),
+            float(profile.get("empathy", 0.5)),
+            str(profile.get("style", "balanced")),
+        ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+
 def search_similar(query, vendor_filter=None, top_k=5,
                    date_from=None, date_to=None, amount_min=None, amount_max=None,
                    keyword_filter=None):

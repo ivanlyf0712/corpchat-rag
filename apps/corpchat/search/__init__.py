@@ -44,6 +44,7 @@ from .agentic import AgenticDecider
 from .litellm_client import LiteLLMClient
 from .router import SearchRouter
 from .temporal import TimeExpressionParser, TimeWindow
+from .persona import DispositionProfile
 from .tools import CROSS_TABLE_TOOLS, search_messages, search_contacts
 from .cross_table_agent import CrossTableAgent, cross_table_chat, is_cross_table_available
 from .utils import _clean_text_from_enriched, _compute_structural_relationships, _segment
@@ -80,6 +81,7 @@ __all__ = [
     "DEFAULT_INDEX_PATH",
     "DEFAULT_RERANKER_MODEL",
     "DEFAULT_RERANK_TOP_N",
+    "DispositionProfile",
     "IndexBuilder",
     "LITELLM_API_KEY",
     "LITELLM_BASE_URL",

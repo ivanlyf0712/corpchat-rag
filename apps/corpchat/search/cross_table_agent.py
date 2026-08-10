@@ -24,6 +24,7 @@ from .config import (
     LITELLM_MODEL,
     logger,
 )
+from .persona import DispositionProfile
 
 # ── LangChain imports ────────────────────────────────────────────
 _LANGCHAIN_AVAILABLE = False
@@ -220,6 +221,7 @@ class CrossTableAgent:
         expand: bool = False,
         use_rerank: bool = False,
         graph_parallel: bool = False,
+        profile: Optional[DispositionProfile] = None,
     ):
         self.api_base = api_base or LITELLM_BASE_URL
         self.api_key = api_key or LITELLM_API_KEY
@@ -227,6 +229,7 @@ class CrossTableAgent:
         self.expand = expand
         self.use_rerank = use_rerank
         self.graph_parallel = graph_parallel
+        self.profile = profile  # DispositionProfile (persona), optional
         self._agent: Optional[Any] = None
         self._last_thoughts: List[str] = []
         self._last_tool_calls: List[Dict[str, Any]] = []
@@ -679,6 +682,9 @@ class CrossTableAgent:
                 "请根据以上信息，给出一个简洁准确的答案。如果信息不足，请如实告知。"
             )
             system = "你是一个企业聊天记录搜索助手。用中文回答，简洁准确。"
+
+        if self.profile is not None:
+            system = self.profile.build_system_prompt(system)
 
         result = client.chat(
             [

@@ -51,6 +51,7 @@ from apps.corpchat.search import (
     Reranker,
     AgenticDecider,
     LiteLLMClient,
+    DispositionProfile,
     load_index,
     DEFAULT_INDEX_PATH,
     LITELLM_API_KEY,
@@ -379,6 +380,7 @@ class Agent:
         label_filter: Optional[str] = None,
         search_mode: str = "hybrid",
         graph_parallel: bool = False,
+        profile: Optional[DispositionProfile] = None,
     ) -> Tuple[str, str, List[Dict]]:
         """
         Process a user query through the agentic pipeline.
@@ -463,7 +465,7 @@ class Agent:
                 # Try LLM answer if available
                 llm_ok = self.classifier._check_llm()
                 if llm_ok and LITELLM_API_KEY:
-                    answer = self._generate_answer(query, context)
+                    answer = self._generate_answer(query, context, profile=profile)
                     if answer is None:
                         # LLM failed — fall back to formatted results
                         answer = self._format_results_as_answer(query, results)
@@ -530,16 +532,20 @@ class Agent:
             logger.debug(f"LLM greeting generation failed: {e}")
         return self._GREETING_RESPONSE
 
-    def _generate_answer(self, query: str, context: str) -> Optional[str]:
-        """Generate LLM answer (requires LiteLLM)."""
+    def _generate_answer(self, query: str, context: str,
+                         profile: Optional[DispositionProfile] = None) -> Optional[str]:
+        """Generate LLM answer (requires LiteLLM). profile: DispositionProfile (optional)."""
         try:
+            system = (
+                "You are a helpful assistant answering questions based on retrieved chat messages. "
+                "Answer concisely in the same language as the query. "
+                "If the context doesn't contain the answer, say so."
+            )
+            if profile is not None:
+                system = profile.build_system_prompt(system)
             result = _llm_client.chat(
                 [
-                    {"role": "system", "content": (
-                        "You are a helpful assistant answering questions based on retrieved chat messages. "
-                        "Answer concisely in the same language as the query. "
-                        "If the context doesn't contain the answer, say so."
-                    )},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"},
                 ],
                 temperature=0.3,
