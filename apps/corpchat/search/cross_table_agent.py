@@ -222,6 +222,7 @@ class CrossTableAgent:
         use_rerank: bool = False,
         graph_parallel: bool = False,
         profile: Optional[DispositionProfile] = None,
+        sources: Optional[List[str]] = None,
     ):
         self.api_base = api_base or LITELLM_BASE_URL
         self.api_key = api_key or LITELLM_API_KEY
@@ -230,6 +231,8 @@ class CrossTableAgent:
         self.use_rerank = use_rerank
         self.graph_parallel = graph_parallel
         self.profile = profile  # DispositionProfile (persona), optional
+        # 数据源门控: 子集 of {"messages", "contacts"}; None = 全部启用
+        self.sources = sources
         self._agent: Optional[Any] = None
         self._last_thoughts: List[str] = []
         self._last_tool_calls: List[Dict[str, Any]] = []
@@ -367,6 +370,13 @@ class CrossTableAgent:
                 model=self.model,
             )
             tool_calls = wrapper._decide_tool_calls(user_input)
+            # 数据源门控: 按 knowledge.sources 过滤工具
+            if self.sources:
+                tool_calls = [
+                    tc for tc in tool_calls
+                    if (tc["name"] == "search_messages" and "messages" in self.sources)
+                    or (tc["name"] == "search_contacts" and "contacts" in self.sources)
+                ]
             self._add_step("🧠", "Agent routing", 0, f"Decided {len(tool_calls)} tool call(s)")
 
             # Extract a clean search query for better tool results

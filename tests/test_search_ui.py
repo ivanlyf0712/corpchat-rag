@@ -409,6 +409,36 @@ def test_config_panel_writes_session_config(monkeypatch):
     assert cfg["search"]["depth"] == "simple"
     assert ss["agent_enabled"] is False
 
+
+def test_citations_appended_when_enabled(monkeypatch):
+    """knowledge.citations=True → 答案附带 【來源】 块。"""
+    import types
+    from streamlit import session_state as ss
+    from apps.corpchat.search.agent_config import default_agent_config
+
+    cfg = default_agent_config()
+    cfg["knowledge"]["citations"] = True
+    ss["agent_config"] = cfg
+    ss["chat_history"] = [{"query": "物流報價", "answer": None, "raw_hits": [], "status": "processing"}]
+    ss["searching"] = True
+    ss["agent_enabled"] = False
+
+    hit = {"id": "m1", "text": "物流報價 100 元", "score": 0.9,
+           "metadata": {"customer_name": "陳志明", "send_time": "2026-08-01T10:00:00", "label": "product_inquiry"}}
+
+    monkeypatch.setattr(app_module, "_run_search", lambda *a, **k: ([], [hit]))
+    monkeypatch.setattr(app_module, "_check_llm_available", lambda: False)
+    monkeypatch.setattr(app_module, "generate_answer_litellm", lambda q, c, profile=None: "answer")
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+    monkeypatch.setattr(app_module, "_search_router", types.SimpleNamespace(
+        decide=lambda q: {"search": True, "query": q, "raw": ""}))
+
+    app_module._render_search_page()
+
+    answer = ss["chat_history"][0]["answer"]
+    assert "【來源】" in answer, f"引用块未附加: {answer!r}"
+    assert "陳志明" in answer
+
 # ── Ticket 03: Unified Process window ─────────────────────────────
 def test_process_window_single_expander_agentic(monkeypatch):
     """Agentic turn renders ONE Process expander with agentic label, collapsed."""

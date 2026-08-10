@@ -56,6 +56,7 @@ from apps.corpchat.agent import (
     INTENT_SYSTEM_INFO,
     INTENT_CLARIFY,
 )
+from apps.corpchat.search.utils import _format_citations
 
 # Module-level intent classifier (cached across renders — deterministic")
 _intent_classifier = IntentClassifier()
@@ -624,6 +625,7 @@ def _render_search_page():
                                 use_rerank=use_rerank,
                                 graph_parallel=graph_parallel,
                                 profile=profile,
+                                sources=cfg["knowledge"].get("sources"),
                             )
                             result = ct_agent.process(query, on_stage=_on_stage)
                             answer = result["output"]
@@ -773,6 +775,9 @@ def _render_search_page():
                         answer = generate_answer_litellm(query, context, profile=profile)
                     else:
                         answer = "LLM is unavailable. Here are the retrieved messages:\n\n" + "\n\n---\n\n".join(context_parts[:3])
+                    # 引用来源: 开启时追加来源块 (sender · 日期 · label)
+                    if cfg["knowledge"]["citations"]:
+                        answer = answer + _format_citations(raw_hits)
                     _complete_stage(slot, "6/6 generating answer...")
 
                     status.update(label="Search complete!", state="complete")

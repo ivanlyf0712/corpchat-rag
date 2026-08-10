@@ -265,6 +265,45 @@ def test_cross_table_agent_forwards_graph_parallel(monkeypatch):
     assert msg_kwargs.get("graph_parallel") is True, f"graph_parallel 未转发: {msg_kwargs}"
 
 
+def test_format_citations_builds_source_block():
+    """_format_citations 从结果 metadata 构建来源块; 空结果返回空串。"""
+    from apps.corpchat.search.utils import _format_citations
+
+    results = [{
+        "id": "m1", "text": "物流報價 100 元", "score": 0.9,
+        "metadata": {"customer_name": "陳志明", "send_time": "2026-08-01T10:00:00", "label": "product_inquiry"},
+    }]
+    block = _format_citations(results)
+    assert "陳志明" in block and "2026-08-01" in block and "product_inquiry" in block
+    assert _format_citations([]) == ""
+
+
+def test_cross_table_agent_contacts_gated_by_sources(monkeypatch):
+    """sources 不含 contacts → 不调用 search_contacts (跨表查询仍走消息)。"""
+    import types
+    from apps.corpchat.search.cross_table_agent import CrossTableAgent
+
+    calls = []
+
+    def _fake_msg_invoke(payload):
+        calls.append("msg")
+        return "【消息搜索结果】\n1. [Score: 0.61] 陳志明 (userid: user_1)\n   合同已签"
+
+    def _fake_contact_invoke(payload):
+        calls.append("contact")
+        return "【联系人搜索结果】"
+
+    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=_fake_msg_invoke))
+    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=_fake_contact_invoke))
+
+    agent = CrossTableAgent(sources=["messages"])
+    agent._extract_search_query = lambda q: "發'合同已簽'消息的人"
+    agent.process("發'合同已簽'消息的人，他的聯絡方式")
+
+    assert "msg" in calls, "messages 源应被搜索"
+    assert "contact" not in calls, f"sources 排除 contacts 仍调用了 search_contacts: {calls}"
+
+
 def test_search_messages_graph_parallel_without_expand_calls_graph_path(monkeypatch):
     """expand=False + graph_parallel=True 也调用图并行路 (与 Searcher Path A 一致)。
 

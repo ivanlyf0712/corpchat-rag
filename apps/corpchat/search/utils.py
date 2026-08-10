@@ -42,6 +42,18 @@ def _segment(text: str) -> str:
     return text
 
 
+def _format_citations(results, max_sources: int = 3) -> str:
+    """从搜索结果构建引用块 (sender · 日期 · label); 空结果返回空串。"""
+    lines = []
+    for r in results[:max_sources]:
+        meta = r.get("metadata", {}) if isinstance(r, dict) else {}
+        sender = meta.get("customer_name") or meta.get("external_userid", "?")
+        ts = str(meta.get("send_time", ""))[:10]
+        label = meta.get("label", "-")
+        lines.append(f"- {sender} · {ts} · [{label}]")
+    return "\n【來源】\n" + "\n".join(lines) if lines else ""
+
+
 def _compute_structural_relationships(chunks: List[Dict]) -> Dict[str, List[Dict]]:
     """
     从分块元数据计算五个结构关系, 返回 {chunk_id: [relationships]}.
