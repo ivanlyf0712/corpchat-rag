@@ -1173,12 +1173,25 @@ def _render_search_page():
                                 sources=cfg["knowledge"].get("sources"),
                                 hindsight_bank=cfg["persona"].get("hindsight_bank") or None,
                             )
-                            # 会话内历史: 从 chat_history 提取已完成轮次
+                            # 会话历史: chat_history (本会话) + DB agent_memory
+                            # (跨页面刷新可恢复, 决策 A4-i 指代解析)。
                             _history = [
                                 {"query": t.get("query"), "answer": t.get("answer")}
                                 for t in st.session_state.get("chat_history", [])
                                 if t.get("answer")
                             ]
+                            try:
+                                from core.corpchat_db import load_agent_memory
+                                _sid = st.session_state.get("session_id")
+                                if _sid:
+                                    _known = {(h["query"], h["answer"]) for h in _history}
+                                    for _m in load_agent_memory(_sid, max_turns=6):
+                                        _q, _a = _m.get("user"), _m.get("bot")
+                                        if _q and (_q, _a) not in _known:
+                                            _history.insert(0, {"query": _q, "answer": _a})
+                                            _known.add((_q, _a))
+                            except Exception:
+                                pass
                             result = ct_agent.process(query, on_stage=_on_stage, on_tool=_on_tool, history=_history)
                             answer = result["output"]
                             tool_calls = result.get("tool_calls", [])
@@ -1193,6 +1206,9 @@ def _render_search_page():
                             steps = []
                         _complete_stage(slot, stage_labels[-1] if stage_labels else "done")
                         status.update(label="Agent complete", state="complete")
+                # 引用来源 (agent 模式统一生效): 开启时追加来源块 (sender · 日期 · label)
+                if cfg["knowledge"]["citations"] and 'result' in dir():
+                    answer = answer + _format_citations(result.get("raw_hits", []))
                 pending_turn["answer"] = answer
                 pending_turn["raw_hits"] = result.get("raw_hits", []) if 'result' in dir() else []
                 # Hindsight 参与度 (供 Process 窗显示):
@@ -1202,6 +1218,15 @@ def _render_search_page():
                 pending_turn["hindsight"] = ("recall" if _hs_fired else "skip") if _hs_bank else "none"
                 _retain_search_to_hindsight(pending_turn.get("query", ""), pending_turn["raw_hits"],
                                             bank=cfg["persona"].get("hindsight_bank") or None)
+                # ── 持久化到 agent_memory (DB 多轮记忆, 跨页面刷新可恢复) ──
+                if not str(answer).startswith("Agent error"):
+                    try:
+                        from core.corpchat_db import load_agent_memory, save_agent_memory
+                        _sid = st.session_state.get("session_id") or "default"
+                        _n = len(load_agent_memory(_sid, max_turns=100000))
+                        save_agent_memory(_sid, _n + 1, query, answer, "agent")
+                    except Exception:
+                        pass
                 pending_turn["status"] = "done"
                 pending_turn["agent_steps"] = steps
                 pending_turn["agent_fallback"] = result.get("fallback", False) if 'result' in dir() else False

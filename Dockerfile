@@ -28,7 +28,6 @@ RUN pip install --no-cache-dir \
 # 应用代码 + 索引 (140 chunks + 30 contacts)
 COPY apps/ apps/
 COPY core/ core/
-COPY lib/ lib/
 
 # 运行环境: Streamlit 监听容器内 8501。
 # --server.fileWatcherType=none: 禁用源码热重载监听 —— Streamlit 的模块扫描会

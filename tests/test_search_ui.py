@@ -474,6 +474,97 @@ def test_citations_appended_when_enabled(monkeypatch):
     assert "【來源】" in answer, f"引用块未附加: {answer!r}"
     assert "陳志明" in answer
 
+
+
+def test_citations_appended_in_agent_mode(monkeypatch):
+    """knowledge.citations=True 在 agent 模式同样追加来源块 (spec gap 修复)。"""
+    from streamlit import session_state as ss
+    from apps.corpchat.search.agent_config import default_agent_config
+    import apps.corpchat.search as search_pkg
+
+    cfg = default_agent_config()
+    cfg["knowledge"]["citations"] = True
+    ss["settings_open"] = True
+    ss["agent_config"] = cfg
+    ss["chat_history"] = [{"query": "物流報價", "answer": None, "raw_hits": [], "status": "processing"}]
+    ss["searching"] = True
+    ss["agent_enabled"] = True
+    ss["session_id"] = "ui-test-session"
+
+    hit = {"id": "m1", "text": "物流報價 100 元", "score": 0.9,
+           "metadata": {"customer_name": "陳志明", "send_time": "2026-08-01T10:00:00",
+                        "label": "product_inquiry"}}
+
+    class _FakeCTA:
+        def __init__(self, **kw):
+            pass
+
+        def process(self, query, on_stage=None, on_tool=None, history=None):
+            return {"output": "answer", "raw_hits": [hit], "tool_calls": [],
+                    "steps": [], "success": True, "fallback": False}
+
+    monkeypatch.setattr(search_pkg, "CrossTableAgent", _FakeCTA)
+    monkeypatch.setattr(app_module, "_check_llm_available", lambda: False)
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+    monkeypatch.setattr(app_module, "_retain_search_to_hindsight", lambda *a, **k: None)
+
+    app_module._render_search_page()
+
+    answer = ss["chat_history"][0]["answer"]
+    assert "【來源】" in answer, f"agent 模式引用块未附加: {answer!r}"
+    assert "陳志明" in answer
+
+
+def test_agent_mode_loads_and_persists_agent_memory(monkeypatch):
+    """agent 模式把轮次持久化到 agent_memory, 并把 DB 记忆并入注入历史 (spec gap 修复)。"""
+    from streamlit import session_state as ss
+    from apps.corpchat.search.agent_config import default_agent_config
+    import apps.corpchat.search as search_pkg
+    from core import corpchat_db
+
+    calls = {"load": [], "save": []}
+
+    def _fake_load(sid, max_turns=10):
+        calls["load"].append((sid, max_turns))
+        return [{"user": "之前说的报价", "bot": "报价 100 元", "intent": "agent"}]
+
+    def _fake_save(sid, tn, q, a, intent):
+        calls["save"].append((sid, tn, q, a, intent))
+
+    monkeypatch.setattr(corpchat_db, "load_agent_memory", _fake_load)
+    monkeypatch.setattr(corpchat_db, "save_agent_memory", _fake_save)
+
+    cfg = default_agent_config()
+    ss["settings_open"] = True
+    ss["agent_config"] = cfg
+    ss["chat_history"] = [{"query": "物流報價", "answer": None, "raw_hits": [], "status": "processing"}]
+    ss["searching"] = True
+    ss["agent_enabled"] = True
+    ss["session_id"] = "sess-1"
+
+    class _FakeCTA:
+        def __init__(self, **kw):
+            pass
+
+        def process(self, query, on_stage=None, on_tool=None, history=None):
+            calls["history"] = history
+            return {"output": "answer", "raw_hits": [], "tool_calls": [],
+                    "steps": [], "success": True, "fallback": False}
+
+    monkeypatch.setattr(search_pkg, "CrossTableAgent", _FakeCTA)
+    monkeypatch.setattr(app_module, "_check_llm_available", lambda: False)
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+    monkeypatch.setattr(app_module, "_retain_search_to_hindsight", lambda *a, **k: None)
+
+    app_module._render_search_page()
+
+    assert calls["load"], "agent 模式应读取 DB agent_memory"
+    assert calls["save"], "agent 模式应持久化到 DB agent_memory"
+    assert calls["save"][0][0] == "sess-1", f"应使用当前 session_id: {calls['save']}"
+    hist = calls.get("history", [])
+    assert any(h.get("query") == "之前说的报价" for h in hist), \
+        f"DB 记忆应并入注入历史: {hist}"
+
 # ── Ticket 03: Unified Process window ─────────────────────────────
 def test_process_window_single_expander_agentic(monkeypatch):
     """Agentic turn renders ONE Process expander with agentic label, collapsed."""
