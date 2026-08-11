@@ -278,3 +278,36 @@ def test_regression_combined_time_relationship(graph_time_searcher):
         )
     labels = {r["metadata"]["label"] for r in results}
     assert "product_inquiry" in labels, "窗口内物流对话应被召回"
+
+
+# ── One deep retrieval seam: Searcher.search_queries (candidate 2) ─
+def test_search_queries_single_query_matches_search(searcher):
+    """search_queries(单路) 与 search() 直接路径产出相同文档顺序 — 同一检索 seam。
+
+    这是"agent 工具与 CLI/UI 走同一条检索管线"的回归断言: 工具经
+    search_queries 调用, 其结果必须与 search() 的直接路径一致。
+    """
+    query = "物流報價 方案"
+    direct = searcher.search(query, mode="hybrid", limit=5, expand=False,
+                             graph_expand=0, use_rerank=False)
+    via_seam = searcher.search_queries([(query, 1.0)], limit=5)
+    assert direct and via_seam, "两个入口都应返回结果"
+    assert [r["id"] for r in direct] == [r["id"] for r in via_seam], (
+        f"search_queries 结果顺序与 search() 不一致:\n"
+        f"  direct={[r['id'] for r in direct]}\n"
+        f"  seam  ={[r['id'] for r in via_seam]}"
+    )
+
+
+def test_search_queries_where_filter(searcher):
+    """search_queries 的 where 元数据过滤生效 (sender/receiver 过滤的同一路径)。"""
+    query = "投資"
+    results = searcher.search_queries(
+        [(query, 1.0)], limit=10,
+        where="json_extract(tags, '$.label') = 'investment_opportunity'",
+    )
+    assert results, "where 过滤后仍应返回 investment_opportunity 文档"
+    labels = [r.get("metadata", {}).get("label") for r in results]
+    assert all(l == "investment_opportunity" for l in labels), (
+        f"where 过滤泄漏了其他 label: {labels}"
+    )

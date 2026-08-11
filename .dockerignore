@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+.git
+.pytest_cache
+.scratch
+docs
+tests
+models
+.env
+.env.bak
+*.log
+STATUS_REPORT.md
+CONTEXT.md
+AGENTS.md
+CLAUDE.md
+README.md

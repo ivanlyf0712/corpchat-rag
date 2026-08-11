@@ -29,12 +29,14 @@ RAG_MODEL = "qwen2.5:1.5b"       # RAG answer generation model
 LLAMA_SERVER_URL = "http://127.0.0.1:8081/v1/chat/completions"
 
 # PostgreSQL
+# 凭据只从环境变量读取 (P0 security fix): 不再硬编码默认口令。
+# core.db.get_db_connection() 在 DB_PASSWORD 缺失时 fail-fast。
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "user": "ocr",
-    "password": "***REMOVED***",
-    "dbname": "invoices"
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", 5432)),
+    "user": os.getenv("DB_USER", "ocr"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "dbname": os.getenv("DB_NAME", "invoices"),
 }
 
 # JSON extraction prompts

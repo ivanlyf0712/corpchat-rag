@@ -25,12 +25,13 @@ if ROOT_DIR not in sys.path:
 try:
     from core.config import DB_CONFIG
 except ImportError:
+    # 仅当 core.config 不可导入时的兜底; 凭据同样只从环境变量读取 (P0 security fix)。
     DB_CONFIG = {
         "host": os.getenv("DB_HOST", "localhost"),
         "port": int(os.getenv("DB_PORT", 5432)),
         "dbname": os.getenv("DB_NAME", "invoices"),
         "user": os.getenv("DB_USER", "ocr"),
-        "password": os.getenv("DB_PASSWORD", "***REMOVED***"),
+        "password": os.getenv("DB_PASSWORD", ""),
     }
 
 # ── 日志 ─────────────────────────────────────────────────────────
@@ -54,6 +55,24 @@ _LOCAL_MODEL_PATH = os.path.join(ROOT_DIR, "models", "bge-m3")
 if os.path.isdir(_LOCAL_MODEL_PATH):
     _EMBED_MODEL = _LOCAL_MODEL_PATH
 
+# ── 重排序模型: 本地缓存优先 (中文能力 BAAI/bge-reranker-base) ────
+DEFAULT_RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base")
+_LOCAL_RERANKER_PATH = os.path.join(ROOT_DIR, "models", "bge-reranker-base")
+if os.path.isdir(_LOCAL_RERANKER_PATH):
+    DEFAULT_RERANKER_MODEL = _LOCAL_RERANKER_PATH
+
+
+# ── HF 离线模式: 本地模型存在时自动离线, 避免每次冷启动联网校验 ──
+# huggingface_hub 在模型已缓存时仍会对 HF Hub 发 30+ 次 HEAD/GET 校验,
+# 弱网下甚至抛 RemoteProtocolError。本地模型目录存在 = 无需联网, 强制离线。
+# 注意: HF 缓存的自动离线由 apps.corpchat.hf_offline 在导入搜索栈之前处理 ——
+# 本模块被导入时 huggingface_hub 已被 txtai 拉入, 在这里设置 env 已来不及生效
+# (constants 在 import 时已缓存)。
+if os.environ.get("HF_HUB_OFFLINE") is None and (
+    os.path.isdir(_LOCAL_MODEL_PATH) or os.path.isdir(_LOCAL_RERANKER_PATH)
+):
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
 # ── 索引路径 ─────────────────────────────────────────────────────
 DEFAULT_INDEX_PATH = os.getenv(
     "INDEX_PATH",
@@ -73,8 +92,7 @@ DEFAULT_HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.5"))
 RRF_K_VALUE = 50
 MAX_SEARCH_LIMIT = 100
 
-# ── 重排序模型: 中文能力 (BAAI/bge-reranker-base) ────────────────
-DEFAULT_RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base")
+# ── 重排序参数 ───────────────────────────────────────────────────
 DEFAULT_RERANK_TOP_N = 20
 
 # ── 查询权重 (§2.7 的 constants.py) ──────────────────────────────
@@ -95,12 +113,13 @@ GRAPH_RETRIEVAL_WEIGHT = float(os.getenv("GRAPH_RETRIEVAL_WEIGHT", "0.8"))
 GRAPH_PARALLEL_HOP_DISCOUNT = float(os.getenv("GRAPH_PARALLEL_HOP_DISCOUNT", "0.8"))
 GRAPH_PARALLEL_SEED_LIMIT = int(os.getenv("GRAPH_PARALLEL_SEED_LIMIT", "10"))
 
-# ── LiteLLM 配置 (密钥必须从环境变量提供, 不硬编码) ──────────────
-LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
-LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "https://your-litellm-proxy.example.com/")
-LITELLM_MODEL = os.getenv("LITELLM_MODEL", "dseek-v4-flash")
+# ── LLM 配置 (密钥必须从环境变量提供, 不硬编码) ───────────────────
+# 默认使用 DeepSeek 作为主 LLM (OpenAI 兼容)。可被 .env 的 LITELLM_* 覆盖。
+LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "") or os.getenv("DEEPSEEK_API_KEY", "")
+LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "https://api.deepseek.com")
+LITELLM_MODEL = os.getenv("LITELLM_MODEL", "deepseek-chat")
 
-# ── DeepSeek 备用 LLM (当主 LLM 不可用时回退) ────────────────────
+# ── DeepSeek (备用/默认 LLM 来源) ────────────────────────────────
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")

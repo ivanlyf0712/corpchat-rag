@@ -69,11 +69,29 @@ def render_turn_process_window(turn: Dict[str, Any], st_module, pd_module) -> No
 
     if agentic:
         badge = "⚠️ fallback" if fallback else "✅"
-        label = f"Process (agentic · {badge} · {n_tools} tools · {total_ms}ms)"
+        tool_names = [t.get("name", "?") for t in process.get("tools", []) if t.get("name")]
+        label = f"Process (agentic · {badge} · {n_tools} tools · {total_ms}ms"
+        if tool_names:
+            label += f" · {', '.join(tool_names)}"
+        label += ")"
     else:
         label = "Process"
 
     with st_module.expander(label, expanded=False):
+        # ── Hindsight 参与度 (recall/skip/retain/none) ──
+        hs = turn.get("hindsight")
+        if hs:
+            hs_text = {
+                "recall": "🧠 Hindsight: memory recall used · retain async",
+                "skip": "🧠 Hindsight: recall skipped (no memory trigger word) · retain async",
+                "retain": "🧠 Hindsight: retain only (recall is agent-mode)",
+                "none": "🧠 Hindsight: not configured",
+            }.get(hs)
+            if hs_text:
+                st_module.markdown(
+                    f"<div style='font-size:0.8rem;color:#6b7280;margin-bottom:4px;'>{hs_text}</div>",
+                    unsafe_allow_html=True,
+                )
         if agentic:
             tools = process.get("tools", [])
             for t in tools:

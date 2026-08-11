@@ -7,8 +7,6 @@ View contacts, messages, statistics, a chat-style conversation viewer, and seman
 import sys
 import os
 import json
-import hashlib
-import requests
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
@@ -18,6 +16,12 @@ from typing import Any, Optional
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+
+# ── HF 离线自动检测: 必须在 import apps.corpchat.search (会拉入 txtai →
+# huggingface_hub) 之前调用。huggingface_hub.constants 在 import 时读取
+# HF_HUB_OFFLINE, 一旦被提前拉入, 自动离线开关将不生效。──
+from apps.corpchat.hf_offline import apply_auto_offline
+apply_auto_offline()
 
 from core.db import get_db_connection
 
@@ -66,21 +70,21 @@ _intent_classifier = IntentClassifier()
 
 # ── Initialize DB-backed agent memory table ──
 try:
-    from core.db import init_agent_memory_table
+    from core.corpchat_db import init_agent_memory_table
     init_agent_memory_table()
 except Exception:
     pass
 
 # ── Initialize DB-backed disposition profiles table (persona) ──
 try:
-    from core.db import init_disposition_profiles_table
+    from core.corpchat_db import init_disposition_profiles_table
     init_disposition_profiles_table()
 except Exception:
     pass
 
 # ── Initialize DB-backed unified agent config table ──
 try:
-    from core.db import init_agent_config_table
+    from core.corpchat_db import init_agent_config_table
     init_agent_config_table()
 except Exception:
     pass
@@ -400,10 +404,22 @@ def _check_llm_available() -> bool:
 
 
 def _load_persona_profile():
-    """从 agent_config 构建当前会话的 DispositionProfile (0-10 → 0-1), 无则 None。"""
+    """从 agent_config 构建当前会话的 DispositionProfile (0-10 → 0-1), 无则 None。
+
+    Hindsight 桥接 (只读镜像): 若配置了 hindsight_bank, 人格完全由 Hindsight bank
+    的 disposition 决定 (唯一真源, 在 Hindsight Web UI 调整)。未配置时用本地
+    persona 滑杆。两者皆无则返回 None (中性默认)。
+    """
     try:
         from apps.corpchat.search.persona import DispositionProfile
-        cfg = st.session_state.get("agent_config")
+        cfg = st.session_state.get("agent_config") or {}
+
+        # 1) Hindsight bank disposition → CARA (唯一真源, 只读)
+        hs_bank = cfg.get("persona", {}).get("hindsight_bank") or os.getenv("HINDSIGHT_BANK_ID")
+        if hs_bank:
+            return DispositionProfile.from_hindsight(hs_bank)
+
+        # 2) 无 Hindsight → 用本地 persona 配置
         if cfg and cfg.get("persona"):
             return DispositionProfile.from_dict(persona_to_profile_dict(cfg["persona"]))
     except Exception:
@@ -411,10 +427,82 @@ def _load_persona_profile():
     return None
 
 
+def _retain_search_to_hindsight(query: str, raw_hits: list, bank: Optional[str] = None) -> None:
+    """搜索后把查询+命中消息写入 Hindsight 记忆 (跨会话记忆, best-effort)。
+
+    每次搜索把用户问题 + 最相关的几条命中消息 retain 到配置的 bank,
+    让 Hindsight 实体图出现新节点, 并供后续会话 recall。
+    bank 优先用调用方传入的 UI 配置值, 回退到环境变量/默认。
+    """
+    try:
+        from apps.corpchat.search import hindsight_client as hc
+        if not bank:
+            bank = os.getenv("HINDSIGHT_BANK_ID") or "test-bank"
+        # 组装记忆内容: 查询 + 命中消息摘要 (保留实体可提取性)
+        parts = [f"用户查询: {query}"]
+        seen = set()
+        for h in raw_hits or []:
+            if not isinstance(h, dict):
+                continue
+            mid = str(h.get("id", ""))
+            if mid in seen:
+                continue
+            seen.add(mid)
+            text = str(h.get("text", "") or "")[:300]
+            if text:
+                parts.append(f"- {text}")
+            if len(parts) >= 4:
+                break
+        content = "\n".join(parts)
+        if len(content) < 10:
+            return
+        # 实体锚点: 命中消息的 customer_name/company 作为 tags, 供 Hindsight
+        # compact 与未来 recall 保留实体信息 (写入侧保持无条件, 不智能过滤)。
+        from apps.corpchat.search.tools import extract_entity_tags
+        tags = ["corpchat", "search"] + extract_entity_tags(raw_hits)
+        # async_=True: 同步 retain 服务端要跑 ~13s (embedding+实体提取+consolidation),
+        # 会阻塞 UI 至 10s 超时 (Agent complete 后答案迟迟不出现)。异步入队 32ms 返回,
+        # 由 Hindsight 后台处理, 记忆不丢失。
+        hc.retain(content, bank=bank, context=f"corpchat search: {query[:100]}",
+                  tags=tags, async_=True)
+    except Exception:
+        pass
+
+
+def _load_persisted_config() -> Optional[dict]:
+    """从 DB 恢复上次保存的 agent 配置 (跨刷新/跨会话保留)。
+
+    session_id 在 Agent() 构造时随机生成, 刷新后变化, 无法作为稳定 key。
+    因此这里读取 agent_config 表中最近更新的那条记录 (全局共享配置),
+    而不是按 session_id 精确匹配。无记录时返回 None。
+    """
+    try:
+        from core.db import get_db_connection
+        conn = get_db_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT config FROM agent_config ORDER BY updated_at DESC, id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return None
+            import json
+            cfg = json.loads(row[0])
+            # 兼容旧配置: 缺 hindsight_bank 时补默认 (记住 bank 名)
+            if isinstance(cfg, dict):
+                cfg.setdefault("persona", {}).setdefault("hindsight_bank", "test-bank")
+            return cfg
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
 def _persist_agent_config(cfg=None):
     """把统一 agent 配置持久化到 DB (best-effort, non-fatal)。"""
     try:
-        from core.db import save_agent_config
+        from core.corpchat_db import save_agent_config
         cfg = cfg if cfg is not None else st.session_state.get("agent_config")
         if cfg:
             save_agent_config(st.session_state.get("session_id", "default"), cfg)
@@ -574,65 +662,140 @@ def _cap_graph(nodes: list, edges: list, max_nodes: int = 40, max_edges: int = 8
     return keep, kept_edges
 
 
-def _render_memory_graph(cfg: dict):
-    """渲染 Hindsight 星座视图 (实体关系图)。
+def _extract_data_map(max_nodes: int = 60, max_edges: int = 120) -> dict:
+    """从 txtai 索引图提取数据地图 (消息/联系人关系, 确定性)。
 
-    数据源: 会话聊天历史的检索结果 (raw_hits)。
+    返回 {"nodes": [{id,label,type,size}], "edges": [{source,target}]}。
+    失败时返回空 dict (降级)。
+    """
+    try:
+        from apps.corpchat.search.searcher import Searcher
+        emb = _load_search_index()
+        g = emb.graph
+        if not g or not g.backend:
+            return {}
+        nx_graph = g.backend
+        # 按连接度排序, 保留高连接节点 (信息密度高)
+        degree = {n: nx_graph.degree(n) for n in nx_graph.nodes()}
+        all_nodes = sorted(nx_graph.nodes(), key=lambda n: -degree.get(n, 0))
+        selected = all_nodes[:max_nodes]
+        selected_set = set(selected)
+        # 找选中节点间的边
+        edges = []
+        for src, dst, data in nx_graph.edges(data=True):
+            if src in selected_set and dst in selected_set:
+                edges.append({"source": src, "target": dst})
+                if len(edges) >= max_edges:
+                    break
+        nodes = []
+        for n in selected:
+            attrs = nx_graph.nodes[n]
+            doc_id = str(attrs.get("id", n))
+            nodes.append({
+                "id": n,
+                "label": doc_id.split("__")[0][:24] if "__" in doc_id else doc_id[:24],
+                "type": "person",
+                "size": max(6, min(20, 8 + degree.get(n, 0))),
+            })
+        return {"nodes": nodes, "edges": edges}
+    except Exception:
+        return {}
+
+
+def _render_memory_graph(cfg: dict):
+    """渲染设置面板下的两个图谱 (tabs 切换)。
+
+    - 📊 数据地图: 从 txtai 索引图提取的全量消息/联系人关系 (确定性, 140/384)。
+    - 🧠 记忆视图: Hindsight bank 的记忆实体图 (跨会话, 随交互增长)。
     渲染: 自包含 HTML/SVG 力导向图 (st.iframe srcdoc, 无外部依赖)。
-    联动: 高怀疑度 → 风险标签高亮; 数据源 → 实体过滤; 节点按钮 → 回填搜索框。
     整个渲染 try/except 兜底 —— 图谱故障不应破坏搜索 UI。
     """
     try:
-        from apps.corpchat.search.memory_graph import build_entity_graph
+        tab_data, tab_mem = st.tabs(["📊 数据地图", "🧠 记忆视图"])
 
-        # 图谱数据: 会话历史中各轮检索结果 (含结构化 metadata)
-        graph_messages = []
-        for turn in st.session_state.get("chat_history", []):
-            hits = turn.get("raw_hits") or []
-            if isinstance(hits, list):
-                graph_messages.extend(h for h in hits if isinstance(h, dict))
+        # ── Tab 1: 数据地图 (txtai graph, 全量确定性) ──
+        with tab_data:
+            data_map = _extract_data_map()
+            if not data_map or not data_map.get("nodes"):
+                st.caption("数据地图不可用 (索引未启用图功能 graph mode=off)。")
+            else:
+                st.iframe(_constellation_html(data_map["nodes"], data_map["edges"]), height=420)
+                st.caption(
+                    f"📊 数据地图 · 節點 {len(data_map['nodes'])} · 邊 {len(data_map['edges'])}"
+                    f" · 基于 txtai 图 (确定性消息/联系人关系)"
+                )
 
-        if not graph_messages:
-            st.caption("進行搜索後, 記憶圖譜將在此顯示實體關係。")
-            return
+        # ── Tab 2: 记忆视图 (Hindsight 实体图 / 会话检索实体) ──
+        with tab_mem:
+            hs_bank = cfg.get("persona", {}).get("hindsight_bank") or os.getenv("HINDSIGHT_BANK_ID")
+            if hs_bank:
+                from apps.corpchat.search import hindsight_client as hc
+                hg = hc.get_entity_graph(hs_bank, limit=50)
+                if hg.get("nodes"):
+                    nodes = []
+                    for n in hg["nodes"]:
+                        if not isinstance(n, dict) or not n.get("id"):
+                            continue
+                        nodes.append({
+                            "id": str(n.get("id")),
+                            "label": str(n.get("label") or n.get("id"))[:16],
+                            "type": "person",
+                            "color": n.get("color", "#58a6ff"),
+                            "size": 12,
+                        })
+                    edges = []
+                    for e in hg.get("edges", []):
+                        if not isinstance(e, dict):
+                            continue
+                        s, t = e.get("source"), e.get("target")
+                        if s and t:
+                            edges.append({"source": str(s), "target": str(t)})
+                    if nodes:
+                        st.iframe(_constellation_html(nodes, edges), height=420)
+                        st.caption(
+                            f"🧠 Hindsight 记忆视图 · 實體 {hg.get('total_entities', len(nodes))}"
+                            f" · 邊 {hg.get('total_edges', len(edges))}"
+                            f" · bank {hs_bank} (完整版在 :9999)"
+                        )
+                        return
+                st.caption("Hindsight 记忆为空 — 搜索/对话后会自动沉淀。")
 
-        # 联动 1: 高怀疑度 (>=7) → 风险标签高亮
-        risk = set()
-        if cfg["persona"].get("skepticism", 5) >= 7:
-            risk = {"old_friend_reconnect", "詐騙", "fraud"}
-
-        graph = build_entity_graph(
-            messages=graph_messages,
-            sources=cfg["knowledge"].get("sources", ["messages", "contacts"]),
-            risk_labels=risk,
-        )
-
-        nodes = graph["nodes"]
-        edges = graph["edges"]
-        if not nodes:
-            st.caption("沒有可繪製的實體 (試著搜尋更多消息)。")
-            return
-
-        # 截断大图, 控制浏览器渲染成本 (实体节点优先, 高连接度优先)
-        if len(nodes) > 40 or len(edges) > 80:
-            nodes, edges = _cap_graph(nodes, edges)
-
-        # 自包含力导向星座图 (st.iframe srcdoc, JS 隔离运行)
-        st.iframe(_constellation_html(nodes, edges), height=400)
-
-        # 联动 3: 点击节点 → 回填搜索框 (实体节点按钮)
-        clickable = [n for n in nodes if n["type"] in ("person", "company", "label", "keyword")][:12]
-        if clickable:
-            st.caption("點擊節點 → 填入搜索框:")
-            cols = st.columns(min(3, len(clickable)))
-            for i, n in enumerate(clickable):
-                with cols[i % len(cols)]:
-                    if st.button(n["label"], key=f"graph_node_{i}", use_container_width=True):
-                        st.session_state.search_query = n["label"]
-                        st.rerun()
-
-        # 联动 2 (展示): 数据源门控已在 build_entity_graph(sources=...) 生效
-        st.caption(f"節點 {len(nodes)} · 邊 {len(edges)} · 數據源 {cfg['knowledge'].get('sources')}")
+            # 回退: 会话检索实体的本地图
+            from apps.corpchat.search.memory_graph import build_entity_graph
+            graph_messages = []
+            for turn in st.session_state.get("chat_history", []):
+                hits = turn.get("raw_hits") or []
+                if isinstance(hits, list):
+                    graph_messages.extend(h for h in hits if isinstance(h, dict))
+            if not graph_messages:
+                st.caption("進行搜索後, 記憶圖譜將在此顯示實體關係。")
+                return
+            risk = set()
+            if cfg["persona"].get("skepticism", 5) >= 7:
+                risk = {"old_friend_reconnect", "詐騙", "fraud"}
+            graph = build_entity_graph(
+                messages=graph_messages,
+                sources=cfg["knowledge"].get("sources", ["messages", "contacts"]),
+                risk_labels=risk,
+            )
+            nodes, edges = graph["nodes"], graph["edges"]
+            if not nodes:
+                st.caption("沒有可繪製的實體 (試著搜尋更多消息)。")
+                return
+            if len(nodes) > 40 or len(edges) > 80:
+                nodes, edges = _cap_graph(nodes, edges)
+            st.iframe(_constellation_html(nodes, edges), height=420)
+            st.caption(f"節點 {len(nodes)} · 邊 {len(edges)} · 數據源 {cfg['knowledge'].get('sources')}")
+            # 联动: 点击节点 → 回填搜索框
+            clickable = [n for n in nodes if n["type"] in ("person", "company", "label", "keyword")][:12]
+            if clickable:
+                st.caption("點擊節點 → 填入搜索框:")
+                cols = st.columns(min(3, len(clickable)))
+                for i, n in enumerate(clickable):
+                    with cols[i % len(cols)]:
+                        if st.button(n["label"], key=f"graph_node_{i}", use_container_width=True):
+                            st.session_state.search_query = n["label"]
+                            st.rerun()
     except Exception as e:
         st.caption(f"記憶圖譜渲染失敗: {e}")
 
@@ -674,25 +837,102 @@ def _render_settings_panel(cfg: dict):
     """
     with st.expander("🎛️ 配置代理", expanded=False):
         with st.expander("🧠 人格特質 (CARA)", expanded=False):
+            # ── Hindsight 桥接 (只读镜像模式) ──
+            # 填入 bank ID 后: 人格由 Hindsight 驱动, 滑杆只读显示 Hindsight 真实值。
+            # 修改请到 Hindsight Web UI (链接下方), 或点"刷新"重新拉取。
+            hs_bank = st.text_input(
+                "Hindsight 记忆银行 (可选)",
+                value=cfg["persona"].get("hindsight_bank", ""),
+                help="填入 Hindsight bank ID (如 test-bank), 人格由该 bank 的 disposition 驱动"
+                     " (只读镜像); 留空则用下方本地滑杆。",
+                disabled=st.session_state.searching,
+            )
+            cfg["persona"]["hindsight_bank"] = hs_bank.strip()
+            hs_driven = bool(hs_bank.strip())
+
+            # 当前生效的人格 (Hindsight 驱动时为 Hindsight 值, 否则为本地滑杆值)
+            # session 级缓存: 只在 bank 变更或点"刷新"时重新拉取, 避免每次 rerun 打 API。
+            effective = None
+            if hs_driven:
+                cache_key = f"hs_profile_{hs_bank.strip()}"
+                if (st.session_state.get("hs_bank") != hs_bank.strip()
+                        or st.session_state.get("hs_profile_ts") is None):
+                    try:
+                        from apps.corpchat.search.persona import DispositionProfile
+                        effective = DispositionProfile.from_hindsight(hs_bank.strip())
+                        st.session_state[cache_key] = effective
+                        st.session_state.hs_bank = hs_bank.strip()
+                        st.session_state.hs_profile_ts = True
+                    except Exception as _hs_err:
+                        st.caption(f"⚠️ 无法连接 Hindsight: {type(_hs_err).__name__}: {_hs_err}")
+                else:
+                    effective = st.session_state.get(cache_key)
+
+            col_link, col_refresh = st.columns([3, 1])
+            with col_link:
+                if hs_driven:
+                    st.link_button(
+                        "🔗 在 Hindsight 中调整配置",
+                        f"http://localhost:9999/banks/{hs_bank.strip()}/",
+                        type="secondary",
+                        use_container_width=True,
+                    )
+                else:
+                    st.caption("未连接 Hindsight — 使用下方本地滑杆")
+            with col_refresh:
+                if hs_driven and st.button(
+                    "🔄 刷新", use_container_width=True,
+                    disabled=st.session_state.searching,
+                ):
+                    # 清除 session 缓存标记 → 下一轮从 Hindsight 重新拉取 disposition
+                    st.session_state.hs_profile_ts = None
+                    st.rerun()
+
+            if hs_driven and effective is not None:
+                st.caption(
+                    f"🔗 人格由 Hindsight 驱动: 懷疑 {effective.skepticism:.0%} · "
+                    f"字面 {effective.literality:.0%} · 共情 {effective.empathy:.0%}"
+                    f" (在 Hindsight Web UI 调整)"
+                )
+
+            # 滑杆: Hindsight 驱动时只读显示 Hindsight 值; 否则本地可编辑
+            hs_ro = hs_driven and effective is not None
+            if hs_ro:
+                # Hindsight 0-1 → 0-10 显示刻度 (只读)
+                sk_val = int(round(effective.skepticism * 10))
+                li_val = int(round(effective.literality * 10))
+                em_val = int(round(effective.empathy * 10))
+            else:
+                sk_val = int(cfg["persona"].get("skepticism", 5))
+                li_val = int(cfg["persona"].get("literality", 5))
+                em_val = int(cfg["persona"].get("empathy", 5))
+
             preset_label = st.selectbox(
                 "預設模式", list(PRESET_LABELS.keys()),
                 index=preset_index(cfg["persona"].get("preset", "custom")),
-                disabled=st.session_state.searching,
+                disabled=st.session_state.searching or hs_ro,
             )
             apply_preset(cfg, preset_label)
+
             cfg["persona"]["skepticism"] = st.slider(
-                "懷疑度", 0, 10, int(cfg["persona"].get("skepticism", 5)),
-                help="對證據不足的結論標註不確定性", disabled=st.session_state.searching)
+                "懷疑度", 0, 10, sk_val,
+                help="對證據不足的結論標註不確定性",
+                disabled=st.session_state.searching or hs_ro,
+            )
             cfg["persona"]["literality"] = st.slider(
-                "字面性", 0, 10, int(cfg["persona"].get("literality", 5)),
-                help="嚴格依據檢索原文回答", disabled=st.session_state.searching)
+                "字面性", 0, 10, li_val,
+                help="嚴格依據檢索原文回答",
+                disabled=st.session_state.searching or hs_ro,
+            )
             cfg["persona"]["empathy"] = st.slider(
-                "共情度", 0, 10, int(cfg["persona"].get("empathy", 5)),
-                help="先回應情緒再給信息", disabled=st.session_state.searching)
+                "共情度", 0, 10, em_val,
+                help="先回應情緒再給信息",
+                disabled=st.session_state.searching or hs_ro,
+            )
             style_label = st.selectbox(
                 "回答長度", list(STYLE_LABELS.keys()),
                 index=style_index(cfg["persona"].get("style", "standard")),
-                disabled=st.session_state.searching)
+                disabled=st.session_state.searching or hs_ro)
             cfg["persona"]["style"] = STYLE_LABELS[style_label]
 
         with st.expander("⚙️ 搜索策略", expanded=False):
@@ -748,7 +988,13 @@ def _render_search_page():
             break
 
     # ── 统一 agent 配置 (设置面板关闭时仍保留上次值) ──
-    cfg = st.session_state.get("agent_config") or default_agent_config()
+    cfg = st.session_state.get("agent_config")
+    if cfg is None:
+        # 刷新/新会话 → 从 DB 恢复上次配置 (避免每次刷新重置)
+        cfg = _load_persisted_config()
+        if cfg is None:
+            cfg = default_agent_config()
+        st.session_state.agent_config = cfg
 
     # 提交搜索时自动退出编辑模式 (让聊天区显示处理过程与结果)
     if pending_turn:
@@ -772,6 +1018,8 @@ def _render_search_page():
     if settings_open:
         with st.container(key="settings_panel", border=True):
             _render_settings_panel(cfg)
+            # 滑杆/输入改动即时持久化 → 刷新后也能恢复
+            _persist_agent_config(cfg)
         st.divider()
         st.markdown("#### 🕸️ 記憶圖譜")
         _render_memory_graph(cfg)
@@ -854,6 +1102,30 @@ def _render_search_page():
             else:
                 agent.session_id = st.session_state.session_id
 
+            # ── 问候/系统问题快路: 不走 agent 搜索, 避免 "Hi!" 触发工具调用 ──
+            from apps.corpchat.search.cross_table_agent import _is_greeting_query, _SYSTEM_KEYWORDS
+            _q_lower = (query or "").strip().lower()
+            if _is_greeting_query(_q_lower) or any(kw in _q_lower for kw in _SYSTEM_KEYWORDS):
+                if _check_llm_available():
+                    chat_reply = _llm_client.chat([
+                        {"role": "system", "content": (
+                            "You are a friendly assistant. Reply to greetings naturally and "
+                            "warmly in the same language as the user. Keep it short. Do NOT "
+                            "mention you are an AI or list capabilities.")},
+                        {"role": "user", "content": query},
+                    ], temperature=0.7, max_tokens=60, timeout=5)
+                    answer = chat_reply or "Hello! How can I help you today?"
+                else:
+                    answer = "Hello! I'm CorpChat Intelligence. How can I help you today?"
+                with st.chat_message("assistant"):
+                    st.markdown(answer)
+                pending_turn["answer"] = answer
+                pending_turn["raw_hits"] = []
+                pending_turn["status"] = "done"
+                st.session_state.searching = False
+                st.rerun()
+                return
+
             # ── Persona: persist & load the tuned disposition profile ──
             _persist_agent_config()
             profile = _load_persona_profile()
@@ -868,6 +1140,24 @@ def _render_search_page():
                         def _on_stage(label, detail=""):
                             stage_labels.append(label)
                             _animate_stage(slot, label, detail)
+                            try:
+                                status.update(label=f"{label} {detail}".strip())
+                            except Exception:
+                                pass
+
+                        def _on_tool(tool_name, tool_args):
+                            """Live per-tool stage: 显示 agent 正在调用的精确工具与参数。"""
+                            label = f"🔍 {tool_name}"
+                            try:
+                                args_str = json.dumps(tool_args, ensure_ascii=False)[:80]
+                            except Exception:
+                                args_str = ""
+                            stage_labels.append(label)
+                            _animate_stage(slot, label, args_str)
+                            try:
+                                status.update(label=f"{label} {args_str}".strip())
+                            except Exception:
+                                pass
 
                         st.write("🤖 Unified agent routing query...")
                         try:
@@ -881,8 +1171,15 @@ def _render_search_page():
                                 graph_parallel=graph_parallel,
                                 profile=profile,
                                 sources=cfg["knowledge"].get("sources"),
+                                hindsight_bank=cfg["persona"].get("hindsight_bank") or None,
                             )
-                            result = ct_agent.process(query, on_stage=_on_stage)
+                            # 会话内历史: 从 chat_history 提取已完成轮次
+                            _history = [
+                                {"query": t.get("query"), "answer": t.get("answer")}
+                                for t in st.session_state.get("chat_history", [])
+                                if t.get("answer")
+                            ]
+                            result = ct_agent.process(query, on_stage=_on_stage, on_tool=_on_tool, history=_history)
                             answer = result["output"]
                             tool_calls = result.get("tool_calls", [])
                             steps = result.get("steps", [])
@@ -898,6 +1195,13 @@ def _render_search_page():
                         status.update(label="Agent complete", state="complete")
                 pending_turn["answer"] = answer
                 pending_turn["raw_hits"] = result.get("raw_hits", []) if 'result' in dir() else []
+                # Hindsight 参与度 (供 Process 窗显示):
+                #   recall = 命中触发词, 记忆已注入; skip = gate 跳过 (无触发词); none = 未配置
+                _hs_bank = cfg["persona"].get("hindsight_bank") or os.getenv("HINDSIGHT_BANK_ID")
+                _hs_fired = any(s.get("label") == "Hindsight memory" for s in steps)
+                pending_turn["hindsight"] = ("recall" if _hs_fired else "skip") if _hs_bank else "none"
+                _retain_search_to_hindsight(pending_turn.get("query", ""), pending_turn["raw_hits"],
+                                            bank=cfg["persona"].get("hindsight_bank") or None)
                 pending_turn["status"] = "done"
                 pending_turn["agent_steps"] = steps
                 pending_turn["agent_fallback"] = result.get("fallback", False) if 'result' in dir() else False
@@ -1040,6 +1344,11 @@ def _render_search_page():
             # Update the turn with results
             pending_turn["answer"] = answer
             pending_turn["raw_hits"] = raw_hits
+            # 非 agent 模式不跑 recall, 只做 retain; 未配置 bank → none
+            _hs_bank = cfg["persona"].get("hindsight_bank") or os.getenv("HINDSIGHT_BANK_ID")
+            pending_turn["hindsight"] = "retain" if _hs_bank else "none"
+            _retain_search_to_hindsight(query, raw_hits,
+                                        bank=cfg["persona"].get("hindsight_bank") or None)
             pending_turn["status"] = "done"
             st.session_state.searching = False
             st.rerun()

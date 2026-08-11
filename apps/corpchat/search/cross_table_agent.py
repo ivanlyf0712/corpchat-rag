@@ -15,6 +15,7 @@ Fallback: If LangChain is unavailable, falls back to the original Agent pipeline
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -39,19 +40,12 @@ except ImportError:
 
 
 # ── Intent keyword tables (rule fast-path & LLM-down fallback) ────
-_GREETING_KEYWORDS = (
-    "hi", "hello", "hey", "hiya", "howdy", "greetings",
-    "how are you", "how's it going", "how are you doing", "how do you do",
-    "what's up", "whats up", "good morning", "good afternoon", "good evening",
-    "long time no see", "nice to meet you", "good to see you",
-    "嗨", "你好", "哈囉", "早安", "午安", "晚安",
-    "最近怎么样", "最近怎樣", "吃了嗎", "吃了吗",
-)
-
-_SYSTEM_KEYWORDS = (
-    "你是誰", "你是谁", "what can you do", "能做什麼", "能做什么",
-    "能做", "功能", "能力", "help", "使用說明", "搜索範圍",
-    "你会什么", "你會什麼", "你会做什么", "你會做什麼",
+# 单一来源: apps.corpchat.search.intent_words (候选 4)。这里保留旧私有名
+# 作向后兼容别名 (app.py / 测试仍从本模块 import)。
+from .intent_words import (
+    GREETING_KEYWORDS as _GREETING_KEYWORDS,
+    SYSTEM_KEYWORDS as _SYSTEM_KEYWORDS,
+    is_greeting_query as _is_greeting_query,
 )
 
 _CONTACT_KEYWORDS = (
@@ -77,24 +71,18 @@ _CROSS_TABLE_TERMS = (
 _LLM_AVAILABILITY_CACHE: Dict[Tuple[str, str], bool] = {}
 
 
-def _is_greeting_query(q: str) -> bool:
-    """Greeting detection shared by the tool router and the quick-respond gate.
-
-    Single tokens match whole-word (so "hi" never fires inside "which"/"this"),
-    multi-word phrases match as substrings, and CJK phrases match on their own
-    boundaries. Kept conservative: courteous-prefix greetings ("您好", "在嗎")
-    are deliberately excluded — the LLM classify path covers those, and a
-    greeting word must never swallow a search request.
-    """
-    if len(q) >= 20:
-        return False
-    for g in _GREETING_KEYWORDS:
-        if " " in g or "'" in g or "-" in g:
-            if g in q:
-                return True
-        elif re.search(rf"(^|[^a-z]){re.escape(g)}([^a-z]|$)", q):
-            return True
-    return False
+# ── Hindsight 按需 recall 判定 (决策 16: 记忆触达词 gate) ──────────
+# 用户拍板: 只命中显式跨会话引用词才注入 Hindsight 记忆, 平时不调 recall。
+# - 刻意不用裸指代词 (她/他/这个/那个): 会话内指代由 process() 的
+#   会话历史注入 (A4-i) 解析, 触发 recall 只会浪费一次调用。
+# - 代价: 无触达词的隐性记忆查询 ("客户喜欢什么沟通方式") 会漏掉,
+#   退回纯工具回答 —— 等价于接入 Hindsight 之前的行为, 可接受。
+# gate 谓词归属 Hindsight 适配器 (hindsight_client.needs_recall), 这里
+# 仅保留向后兼容别名 (测试与旧引用仍可 import _needs_hindsight_recall)。
+from .hindsight_client import (  # noqa: F401  (向后兼容别名)
+    _MEMORY_TRIGGER_KEYWORDS,
+    needs_recall as _needs_hindsight_recall,
+)
 
 
 class _LiteLLMWrapper(BaseChatModel):
@@ -115,113 +103,127 @@ class _LiteLLMWrapper(BaseChatModel):
         return self._client
     
     def bind_tools(self, tools, **kwargs):
-        """Required by LangGraph for tool-calling models."""
+        """Store tool schemas so _generate() can send them to the LLM."""
         self._bound_tools = list(tools)
         return self
-    
-    def _decide_tool_calls(self, user_input: str) -> List[Dict]:
-        """
-        Decide which tools to call based on the user query.
-        Returns a list of tool-call dicts in LangChain format:
-          [{"name": ..., "args": {...}, "id": ...}]
-        """
-        q = user_input.lower().strip()
 
-        # Contact-detail questions → search_contacts
-        wants_contact = any(kw in q for kw in _CONTACT_KEYWORDS)
-        # Message questions → search_messages
-        wants_message = any(kw in q for kw in _MESSAGE_KEYWORDS)
+    def _messages_to_openai(self, messages) -> List[Dict]:
+        """Convert LangChain messages to OpenAI chat-format dicts."""
+        raw = []
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                raw.append({"role": "system", "content": str(msg.content)})
+            elif isinstance(msg, HumanMessage):
+                raw.append({"role": "user", "content": str(msg.content)})
+            elif isinstance(msg, AIMessage):
+                entry: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+                tool_calls = getattr(msg, "tool_calls", None) or []
+                if tool_calls:
+                    entry["tool_calls"] = [
+                        {
+                            "id": tc.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("name", ""),
+                                "arguments": json.dumps(tc.get("args", {}), ensure_ascii=False),
+                            },
+                        }
+                        for tc in tool_calls
+                    ]
+                raw.append(entry)
+            elif getattr(msg, "type", "") == "tool":
+                raw.append({
+                    "role": "tool",
+                    "tool_call_id": getattr(msg, "tool_call_id", ""),
+                    "content": str(msg.content),
+                })
+            else:
+                raw.append({"role": "user", "content": str(getattr(msg, "content", ""))})
+        return raw
 
-        # Cross-table: "who did X spoke to" / "发'X'消息的人" → both
-        cross_table = any(t in q for t in _CROSS_TABLE_TERMS)
-
-        # 结构化过滤查询 (含链接/URL/标签等精确条件) → SQL 精确检索 (不走语义向量)
-        struct_kws = ("link", "url", "http", "www", "網址", "網址", "链接", "連結", "网站", "網站")
-        msg_ctx = ("message" in q or "messages" in q or "msg" in q or "消息" in q or "訊息" in q
-                   or "sent" in q or "contain" in q or "含" in q or "有" in q
-                   or "找" in q or "search" in q or "查" in q or "发" in q or "發" in q)
-        if any(kw in q for kw in struct_kws) and msg_ctx:
-            return [{
-                "name": "search_messages_where",
-                "args": {"condition": user_input},
-                "id": "call_struct_1",
-            }]
-
-        # Greeting / system questions → no tools.
-        # Checked AFTER search keywords so an explicit search request wins
-        # over a courtesy greeting word embedded in it.
-        if not (wants_contact or wants_message or cross_table) and _is_greeting_query(q):
-            return []
-        if not (wants_contact or wants_message or cross_table) and any(kw in q for kw in _SYSTEM_KEYWORDS):
-            return []
-
-        tool_calls = []
-        if wants_message or cross_table:
-            tool_calls.append({
-                "name": "search_messages",
-                "args": {"query": user_input},
-                "id": "call_msg_1",
+    @staticmethod
+    def _tools_to_schema(tools) -> List[Dict]:
+        """Convert LangChain tools to OpenAI function-calling schema."""
+        schema = []
+        for tool in tools:
+            try:
+                name = tool.name if hasattr(tool, "name") else getattr(tool, "func", tool).__name__
+            except Exception:
+                name = str(tool)
+            try:
+                args_schema = tool.args_schema
+            except Exception:
+                args_schema = None
+            if args_schema is not None:
+                try:
+                    parameters = args_schema.model_json_schema()
+                except Exception:
+                    parameters = args_schema.schema()
+            else:
+                parameters = {"type": "object", "properties": {}}
+            schema.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool.description if hasattr(tool, "description") else "",
+                    "parameters": parameters,
+                },
             })
-        if wants_contact or cross_table:
-            tool_calls.append({
-                "name": "search_contacts",
-                "args": {"query": user_input},
-                "id": "call_contact_1",
-            })
-
-        # Default: if nothing matched, search messages (most common intent)
-        if not tool_calls:
-            tool_calls.append({
-                "name": "search_messages",
-                "args": {"query": user_input},
-                "id": "call_msg_1",
-            })
-        return tool_calls
+        return schema
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        """Call LiteLLM and return ChatResult.
+        """Call the LLM with real tool calling; return ChatResult.
 
-        For the first turn (user query), we emit tool calls so LangGraph
-        actually executes the search tools. On subsequent turns (after tools
-        have run), we call the LLM to synthesize the final answer.
+        When tools are bound, the schema is sent with the request. If the
+        model responds with tool_calls, they are parsed and returned as
+        AIMessage.tool_calls (LangGraph executes them and calls back with the
+        results). Otherwise the model's content is the final answer.
         """
         client = self._get_client()
-        # Convert LangChain messages to dicts
-        raw_messages = []
-        has_tool_result = False
-        user_query = ""
-        for msg in messages:
-            if isinstance(msg, HumanMessage):
-                raw_messages.append({"role": "user", "content": msg.content})
-                if not user_query:
-                    user_query = str(msg.content)
-            elif isinstance(msg, SystemMessage):
-                raw_messages.append({"role": "system", "content": msg.content})
-            elif isinstance(msg, AIMessage):
-                raw_messages.append({"role": "assistant", "content": msg.content})
-            elif hasattr(msg, "type") and msg.type == "tool":
-                has_tool_result = True
-                raw_messages.append({"role": "user", "content": f"Tool result: {msg.content}"})
-            else:
-                raw_messages.append({"role": "user", "content": str(msg.content)})
+        raw_messages = self._messages_to_openai(messages)
+        tools_schema = self._tools_to_schema(self._bound_tools) if self._bound_tools else None
 
-        # If tools haven't run yet, emit tool calls so the agent executes them
-        if not has_tool_result and user_query:
-            tool_calls = self._decide_tool_calls(user_query)
-            if tool_calls:
-                message = AIMessage(content="", tool_calls=tool_calls)
-                generation = ChatGeneration(message=message)
-                return ChatResult(generations=[generation])
+        result = client.chat_message(
+            raw_messages,
+            tools=tools_schema,
+            temperature=kwargs.get("temperature", 0.1),
+            max_tokens=kwargs.get("max_tokens", 2048),
+            timeout=kwargs.get("timeout", 30),
+        )
+        if result is None:
+            # LLM unreachable → empty AIMessage ends the loop gracefully;
+            # CrossTableAgent.process() then falls back.
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=""))])
 
-        # Tools have run (or no tools needed) → synthesize final answer with LLM
-        content = client.chat(raw_messages, temperature=kwargs.get("temperature", 0.1),
-                             max_tokens=kwargs.get("max_tokens", 2048), timeout=30)
+        content = result.get("content") or ""
+        raw_tool_calls = result.get("tool_calls") or []
+
+        if raw_tool_calls:
+            parsed_tool_calls = []
+            for tc in raw_tool_calls:
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                args_raw = fn.get("arguments") or "{}"
+                try:
+                    args = json.loads(args_raw)
+                except (json.JSONDecodeError, TypeError) as e:
+                    # 决策 15: 非法 tool_calls → 抛异常, 让 LangGraph 重试本轮。
+                    raise ValueError(
+                        f"LLM returned malformed tool arguments for {name!r}: {args_raw!r} ({e})"
+                    )
+                parsed_tool_calls.append({
+                    "name": name,
+                    "args": args if isinstance(args, dict) else {},
+                    "id": tc.get("id", ""),
+                })
+            message = AIMessage(content="", tool_calls=parsed_tool_calls)
+            generation = ChatGeneration(message=message)
+            return ChatResult(generations=[generation])
 
         message = AIMessage(content=content or "")
         generation = ChatGeneration(message=message)
         return ChatResult(generations=[generation])
 
-    
     @property
     def _llm_type(self) -> str:
         return "litellm-wrapper"
@@ -235,27 +237,38 @@ SYSTEM_PROMPT = """你是一个企业微信聊天记录智能搜索助手，可�
 
 你有以下工具可用：
 
-1. **search_messages(query)** — 搜索内部聊天消息
-   - 用于查找用户对话、消息内容、聊天记录
-   - 返回消息内容、发送者姓名、userid、标签等
-   - 示例查询: "合同已签", "诈骗链接", "物流报价"
+1. **search_messages(query, sender, receiver, limit)** — 搜索内部聊天消息
+   - query: 内容关键词 (如 "合同已签", "物流报价")。当用户只要某人发/收的消息
+     (无内容关键词) 时，可以省略 query。
+   - sender: 发送者姓名或 userid。指定后只返回此人发送的消息。
+     "来自陳志明" / "陳志明发了什么" → sender="陳志明"
+   - receiver: 接收者姓名或 userid。指定后只返回发给此人的消息。
+     "发给李雅婷" / "谁发过消息给李雅婷" → receiver="李雅婷"
+   - sender 和 receiver 可同时使用 (如 "來自陳志明發給李雅婷的消息")。
+   - limit: 返回条数 (默认 10，最多 100)。"列出所有"类查询可调大。
 
 2. **search_contacts(query)** — 搜索联系人信息
    - 用于查找联系人邮箱、电话、公司、职位
    - 返回全名、userid、邮箱、公司、电话、职位
    - 示例查询: "李雅婷", "陳志明 email", "johnsonj", "user_陳志明"
 
+3. **search_conversation_partners(person)** — 查询某人跟谁聊过天
+   - 用于 "who did X talk to"、"X 跟谁聊过"、"X 和谁对话" 这类关系查询
+   - 返回 X 参与过的所有会话的对侧联系人列表 (不含 X 自己)
+   - 示例: person="陳志明"
+
 工作流程:
-1. 分析用户问题，判断需要哪些数据
-2. 如果需要查消息 → 调用 search_messages
-3. 如果需要查联系人 → 调用 search_contacts
-4. 如果需要结合多个来源 → 先查消息获取 userid，再用 userid 查联系人
-5. 用中文整合所有结果，给出清晰的自然语言答案
+1. 分析用户问题，判断需要哪些数据和过滤条件
+2. 涉及消息内容/发送者/接收者 → search_messages (填 query/sender/receiver)
+3. 涉及联系人资料 → search_contacts
+4. 问"谁跟谁聊过" → search_conversation_partners
+5. 需要结合多个来源 → 先查消息获取 userid，再用 userid 查联系人
+6. 用中文整合所有结果，给出清晰的自然语言答案
 
 关键规则:
 - 如果问题是闲聊、问候、系统能力询问 → 直接回答，无需调用工具
-- 如果问题需要跨表查询（如"发'合同已签'消息的人，他的邮箱是什么？"）→
-  先调用 search_messages 查消息 → 从结果提取 userid → 再用 userid 调用 search_contacts 查联系人
+- 解析"来自 X" → sender=X；解析"发给 Y" → receiver=Y；两者同时出现 → 都填
+- 如果工具返回"匹配到多个联系人"的澄清提示，向用户询问具体是哪一位
 - 用中文回答，保持简洁准确
 - 如果搜索结果为空，如实告知用户
 """
@@ -283,6 +296,7 @@ class CrossTableAgent:
         graph_parallel: bool = False,
         profile: Optional[DispositionProfile] = None,
         sources: Optional[List[str]] = None,
+        hindsight_bank: Optional[str] = None,
     ):
         self.api_base = api_base or LITELLM_BASE_URL
         self.api_key = api_key or LITELLM_API_KEY
@@ -293,10 +307,19 @@ class CrossTableAgent:
         self.profile = profile  # DispositionProfile (persona), optional
         # 数据源门控: 子集 of {"messages", "contacts"}; None = 全部启用
         self.sources = sources
+        # Hindsight 记忆银行 (跨会话记忆后端): None = 禁用记忆注入
+        self.hindsight_bank = hindsight_bank or os.getenv("HINDSIGHT_BANK_ID")
         self._agent: Optional[Any] = None
         self._last_thoughts: List[str] = []
         self._last_tool_calls: List[Dict[str, Any]] = []
         self._steps: List[Dict[str, Any]] = []
+        # 每次 process() 调用可注入的 on_tool 回调 (UI 实时工具显示)。
+        # 工具包装器在真实调用时读取它, 因此缓存的 agent 可跨调用复用。
+        self._on_tool_callback: Optional[callable] = None
+        # 真实工具调用的逐次结果快照 (tool → meta), 供 process() 做逐调用归属。
+        # 与 tools._last_msg_meta 全局兼容通道不同, 该日志随 agent 实例走,
+        # 不跨会话共享, 并保留每次调用的顺序。
+        self._tool_meta_log: List[Dict[str, Any]] = []
 
     def _get_llm(self):
         """Create a LangChain-compatible LLM wrapper around LiteLLMClient."""
@@ -307,21 +330,87 @@ class CrossTableAgent:
         )
 
     def _init_agent(self):
-        """Lazy-initialize the LangGraph ReAct agent."""
+        """Lazy-initialize the LangGraph ReAct agent.
+
+        Binds the 3-tool main-path toolset (search_messages / search_contacts /
+        search_conversation_partners), injects the module-level retrieval
+        config (expand/rerank/graph_parallel), applies the persona profile to
+        the system prompt, and gates tools by knowledge.sources.
+        """
         if self._agent is not None:
             return
 
         if not _LANGCHAIN_AVAILABLE:
             raise RuntimeError("LangChain is not installed. Run: pip install langchain langchain-community")
 
-        from .tools import search_messages, search_contacts, search_messages_where
+        from .tools import CROSS_TABLE_TOOLS, configure_search
+
+        configure_search(expand=self.expand, use_rerank=self.use_rerank,
+                         graph_parallel=self.graph_parallel)
+
+        tools = list(CROSS_TABLE_TOOLS)
+        if self.sources:
+            tools = [
+                t for t in tools
+                if (t.name == "search_messages" and "messages" in self.sources)
+                or (t.name == "search_conversation_partners" and "messages" in self.sources)
+                or (t.name == "search_contacts" and "contacts" in self.sources)
+            ]
+        if not tools:
+            raise RuntimeError(f"No tools available for sources={self.sources}")
+
+        # 包装工具: 每次真实调用时触发 on_tool 回调 (UI 实时显示精确工具+参数)。
+        # 包装只读 self._on_tool_callback (每次 process() 调用可更新), 因此
+        # 缓存的 agent (self._agent) 可跨调用安全复用。
+        tools = [self._notifying_tool(t) for t in tools]
 
         model = self._get_llm()
+        prompt = SYSTEM_PROMPT
+        if self.profile is not None:
+            prompt = self.profile.build_system_prompt(prompt)
 
-        self._agent = create_react_agent(
-            model,
-            tools=[search_messages, search_contacts, search_messages_where],
-            prompt=SYSTEM_PROMPT,
+        self._agent = create_react_agent(model, tools=tools, prompt=prompt)
+
+    def _notifying_tool(self, tool):
+        """Wrap a LangChain tool so each real invocation notifies the UI.
+
+        Rebuilds the tool via StructuredTool.from_function preserving its name,
+        description and args_schema (so model tool-calling schemas are unchanged).
+        The wrapper fires `self._on_tool_callback(tool_name, tool_args)` (set per
+        process() call) right before the underlying function runs, then returns
+        the original result untouched.
+        """
+        import functools
+        from langchain_core.tools import StructuredTool
+
+        func = tool.func
+
+        @functools.wraps(func)
+        def _run(*args, **kwargs):
+            cb = self._on_tool_callback
+            if cb is not None:
+                try:
+                    cb(tool.name, dict(kwargs))
+                except Exception:
+                    pass
+            result = func(*args, **kwargs)
+            # 逐调用结果快照: 在工具返回后立即(同线程)抓取该次调用的结构化 meta,
+            # 供 process() 做逐调用归属 (多 search_messages 调用各得各的 meta,
+            # 并发会话互不污染)。
+            try:
+                from .tools import snapshot_meta
+                meta = snapshot_meta(tool.name)
+                if meta is not None:
+                    self._tool_meta_log.append({"tool": tool.name, "meta": meta})
+            except Exception:
+                pass
+            return result
+
+        return StructuredTool.from_function(
+            func=_run,
+            name=tool.name,
+            description=tool.description,
+            args_schema=tool.args_schema,
         )
 
     def _add_step(self, icon: str, label: str, duration_ms: int, detail: str = "") -> None:
@@ -367,20 +456,25 @@ class CrossTableAgent:
         return "zh-CN"
 
 
-    def process(self, user_input: str, on_stage: Optional[callable] = None) -> Dict[str, Any]:
+    def process(self, user_input: str, on_stage: Optional[callable] = None,
+                on_tool: Optional[callable] = None,
+                history: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
         Process a user query through the cross-table agent.
-
-        Uses a manual ReAct loop: decide which tools to call → execute them →
-        synthesize the final answer with the LLM. This is more reliable than
-        relying on LangGraph's tool-calling protocol, which requires the model
-        to emit structured tool calls.
 
         Args:
             user_input: The user's query string.
             on_stage: Optional callback `on_stage(label: str, detail: str = "")`
                 invoked as each processing stage starts. The UI uses it to
                 drive the fade-in/out stage animation.
+            on_tool: Optional callback `on_tool(tool_name: str, tool_args: dict)`
+                invoked each time the agent actually calls a search tool, so the
+                UI can show the exact tool + arguments live (per-tool stage).
+            history: Optional list of prior conversation turns, each with
+                {"query": str, "answer": str}. Injected as session context so
+                the agent can resolve references ("her" → 李雅婷) and avoid
+                redundant tool calls on follow-ups. Kept concise (summaries)
+                to limit token cost; result tables are preserved verbatim.
 
         Returns:
             Dict with keys:
@@ -403,6 +497,9 @@ class CrossTableAgent:
         self._last_thoughts = []
         self._last_tool_calls = []
         self._steps = []
+        self._tool_meta_log = []
+        # 每次 process() 调用可携带新的 on_tool 回调 (UI 实时工具显示)
+        self._on_tool_callback = on_tool
         _start = _time.perf_counter()
 
         # ── Step 1: Quick check — is this a greeting or system question? ──
@@ -420,107 +517,127 @@ class CrossTableAgent:
                 "fallback": False,
             }
 
-        # ── Step 2: Manual ReAct loop (reliable, no LangGraph dependency) ──
+        # ── Step 2: Real LangGraph ReAct loop (DeepSeek native tool calling) ──
         try:
-            from .tools import search_messages, search_contacts, search_messages_where
+            from .tools import configure_search
+            configure_search(expand=self.expand, use_rerank=self.use_rerank,
+                             graph_parallel=self.graph_parallel)
+            self._init_agent()
 
-            # Decide which tools to call based on the query
-            wrapper = _LiteLLMWrapper(
-                api_base=self.api_base,
-                api_key=self.api_key,
-                model=self.model,
+            _stage("🧠", "agent thinking...")
+            _t0 = _time.perf_counter()
+
+            # ── Hindsight 跨会话记忆注入 ──
+            # recall 与当前查询相关的历史记忆, 作为上下文附在用户问题后,
+            # 让 agent 能利用此前会话存入的记忆 (跨会话/跨轮次上下文)。
+            # ── 会话内历史注入 (A4-i: 让 LLM 自己解析指代) ──
+            # 把前几轮对话摘要附在用户问题前, 让 agent 能解析 "her"→李雅婷
+            # 等指代, 并在追问时避免重复调工具。结果表格保留原文 (A5-b)。
+            hist_parts = []
+            for t in (history or [])[-6:]:
+                if not isinstance(t, dict):
+                    continue
+                q = str(t.get("query") or "")
+                a = str(t.get("answer") or "")
+                if q:
+                    hist_parts.append(f"用户问: {q[:300]}")
+                if a:
+                    hist_parts.append(f"助手答: {a[:500]}")
+            if hist_parts:
+                agent_input = (
+                    "[对话历史 (本次会话前几轮, 用于理解指代如'她'):]\n"
+                    + "\n".join(hist_parts)
+                    + f"\n\n[当前问题]: {user_input}"
+                )
+            else:
+                agent_input = user_input
+
+            # ── Hindsight 跨会话记忆注入 (决策 16: 按需 recall gate) ──
+            # 仅当查询命中显式跨会话引用词 (上次/之前/记得/以前/当时/上回 等)
+            # 才调 recall; 普通查询跳过, 避免污染上下文 + 增加延迟。
+            # 裸指代词 (她/他/这个) 不触发 —— 会话内指代已由上面的历史注入解析。
+            if self.hindsight_bank and _needs_hindsight_recall(user_input):
+                _mem_t0 = _time.perf_counter()
+                try:
+                    from .hindsight_client import recall as hs_recall
+                    mems = hs_recall(user_input, bank=self.hindsight_bank, max_results=5)
+                    if mems:
+                        lines = []
+                        for m in mems:
+                            c = m.get("content") or m.get("text") or ""
+                            if c:
+                                lines.append(f"- {c[:200]}")
+                        if lines:
+                            agent_input = (
+                                f"{agent_input}\n\n[相关历史记忆 (Hindsight bank"
+                                f" {self.hindsight_bank})]:\n" + "\n".join(lines)
+                                + "\n[请结合以上记忆回答; 若与当前问题无关可忽略]"
+                            )
+                except Exception as _mems_err:
+                    logger.debug(f"Hindsight recall failed: {_mems_err}")
+                self._add_step("🧠", "Hindsight memory",
+                               int((_time.perf_counter() - _mem_t0) * 1000),
+                               f"recall on '{user_input[:40]}'")
+
+            response = self._agent.invoke(
+                {"messages": [HumanMessage(content=agent_input)]}
             )
-            tool_calls = wrapper._decide_tool_calls(user_input)
-            # 数据源门控: 按 knowledge.sources 过滤工具
-            if self.sources:
-                tool_calls = [
-                    tc for tc in tool_calls
-                    if (tc["name"] == "search_messages" and "messages" in self.sources)
-                    or (tc["name"] == "search_messages_where" and "messages" in self.sources)
-                    or (tc["name"] == "search_contacts" and "contacts" in self.sources)
-                ]
-            self._add_step("🧠", "Agent routing", 0, f"Decided {len(tool_calls)} tool call(s)")
+            _t1 = _time.perf_counter()
+            self._add_step("🧠", "Agent reasoning", int((_t1 - _t0) * 1000), "LangGraph ReAct loop")
+            _stage("✨", "assembling answer...")
 
-            # Extract a clean search query for better tool results
-            search_query = self._extract_search_query(user_input)
-
-            # Execute tools
+            # ── Parse the agent's message history ──
+            messages = response.get("messages", [])
+            executed_calls: List[Dict[str, Any]] = []
             msg_result = ""
             contact_result = ""
-            executed_calls = []
-            for tc in tool_calls:
-                name = tc["name"]
-                _t0 = _time.perf_counter()
-                actual_query = search_query
-                if name == "search_messages":
-                    _stage("🔍", f"using search_messages... query: {search_query}")
-                    msg_result = search_messages.invoke(
-                        {"query": search_query, "expand": self.expand, "use_rerank": self.use_rerank,
-                         "graph_parallel": self.graph_parallel}
-                    )
-                    # If no results with the extracted query, retry with the original query
-                    if self._is_empty_result(msg_result) and search_query != user_input:
-                        msg_result = search_messages.invoke(
-                            {"query": user_input, "expand": self.expand, "use_rerank": self.use_rerank,
-                             "graph_parallel": self.graph_parallel}
-                        )
-                        actual_query = user_input
-                    _t1 = _time.perf_counter()
-                    self._add_step("🔍", "search_messages", int((_t1 - _t0) * 1000), f"Query: '{actual_query}'")
-                    from .tools import get_last_search_meta
-                    meta = get_last_search_meta()
-                elif name == "search_messages_where":
-                    _stage("🗄️", f"using search_messages_where... condition: {search_query}")
-                    msg_result = search_messages_where.invoke({"condition": search_query})
-                    _t1 = _time.perf_counter()
-                    self._add_step("🗄️", "search_messages_where", int((_t1 - _t0) * 1000),
-                                   f"Condition: '{search_query}'")
-                    from .tools import get_last_search_meta
-                    meta = get_last_search_meta()
-                elif name == "search_contacts":
-                    _stage("👤", f"using search_contacts... query: {search_query}")
-                    contact_result = search_contacts.invoke({"query": search_query})
-                    if self._is_empty_result(contact_result) and search_query != user_input:
-                        contact_result = search_contacts.invoke({"query": user_input})
-                        actual_query = user_input
-                    _t1 = _time.perf_counter()
-                    self._add_step("👤", "search_contacts", int((_t1 - _t0) * 1000), f"Query: '{actual_query}'")
-                    from .tools import get_last_contact_meta
-                    meta = get_last_contact_meta()
-                executed_calls.append({
-                    "tool": name,
-                    "tool_input": actual_query,
-                    "observation": (msg_result if name in ("search_messages", "search_messages_where") else contact_result)[:200],
-                    "meta": meta,
-                })
-
-
-
+            # 收集工具调用与观察 (供 UI/记忆图谱使用)。
+            # 逐调用归属: 真实执行时每个工具调用各得各的 meta (来自 agent 实例的
+            # _tool_meta_log, 按执行顺序); 直接注入的 fake agent (测试) 没有真实
+            # 工具执行, 回退到模块级兼容通道 get_last_*_meta。
+            from .tools import get_last_search_meta, get_last_contact_meta
+            last_msg_meta = get_last_search_meta()
+            last_contact_meta = get_last_contact_meta()
+            msg_log = [e["meta"] for e in self._tool_meta_log if e["tool"] == "search_messages"]
+            contact_log = [e["meta"] for e in self._tool_meta_log if e["tool"] == "search_contacts"]
+            # 记忆图谱数据源: 真实 search_messages 最后一次调用的 raw_hits 优先。
+            graph_raw_hits = (msg_log[-1].get("raw_hits", []) if msg_log
+                              else last_msg_meta.get("raw_hits", []))
+            for m in messages:
+                tool_calls = getattr(m, "tool_calls", None) or []
+                for tc in tool_calls:
+                    name = tc.get("name", "")
+                    args = tc.get("args", {}) or {}
+                    if name == "search_messages":
+                        msg_result = f"search_messages({args})"
+                    elif name == "search_contacts":
+                        contact_result = f"search_contacts({args})"
+                    if name == "search_messages":
+                        meta = msg_log.pop(0) if msg_log else last_msg_meta
+                    elif name == "search_contacts":
+                        meta = contact_log.pop(0) if contact_log else last_contact_meta
+                    else:
+                        meta = {}
+                    executed_calls.append({
+                        "tool": name,
+                        "tool_input": args,
+                        "observation": "",
+                        "meta": meta,
+                    })
             self._last_tool_calls = executed_calls
 
-            # ── Step 3: Synthesize answer ──
-            _stage("✨", "generating answer...")
-            self._add_step("✨", "Answer generation", 0, "Combining results")
-            # 联系人结构化查询 → 确定性格式化 (小模型易幻觉, 不冒 LLM 总结风险)
-            only_contacts = bool(executed_calls) and all(
-                tc.get("tool") == "search_contacts" for tc in executed_calls)
-            try:
-                if only_contacts:
-                    output = self._format_fallback_answer(user_input, msg_result, contact_result)
-                else:
-                    output = self._llm_summarize(user_input, msg_result, contact_result)
-            except Exception:
-                output = self._format_fallback_answer(user_input, msg_result, contact_result)
-
-            # 汇总 search_messages / search_messages_where 的原始结果 (含 metadata) — 供记忆图谱使用
-            graph_raw_hits = []
-            for tc in executed_calls:
-                if tc.get("tool") in ("search_messages", "search_messages_where"):
-                    graph_raw_hits.extend(tc.get("meta", {}).get("raw_hits", []))
+            # 最终答案 = 最后一个 assistant 消息的内容
+            final_content = ""
+            for m in reversed(messages):
+                if getattr(m, "type", "") == "ai" and m.content:
+                    final_content = str(m.content)
+                    break
+            if not final_content:
+                raise RuntimeError("Agent returned no final answer")
 
             return {
-                "output": output,
-                "thoughts": [f"Agent routed to {len(tool_calls)} tool(s)"],
+                "output": final_content,
+                "thoughts": [f"Agent executed {len(executed_calls)} tool call(s)"],
                 "tool_calls": executed_calls,
                 "raw_hits": graph_raw_hits,
                 "steps": self._steps,
@@ -531,7 +648,7 @@ class CrossTableAgent:
         except Exception as e:
             logger.warning(f"Cross-table agent failed: {e}")
             self._add_step("⚠️", "Agent error", 0, str(e)[:100])
-            # ── Step 4: Fallback — use two-step reasoning ──
+            # ── Step 3: Fallback — two-step reasoning (degraded, deterministic) ──
             return self._fallback_process(user_input, error=str(e))
 
 
@@ -541,37 +658,30 @@ class CrossTableAgent:
         Rule-first fast path (keyword gates are <1ms):
           greeting → LLM-generated greeting response (or preset if LLM down)
           system   → self-description
-          search   → proceed to tool routing
+          search   → proceed to the LangGraph agent
 
-        The LLM intent classification runs ONLY for ambiguous queries that
-        no rule matched — known greetings/system and obvious searches never
-        pay an extra LLM round-trip (keeps search latency low).
+        Per decision 8, the LLM intent-classification half was removed: any
+        query that is not a rule-detected greeting/system goes straight to the
+        LangGraph agent (DeepSeek decides whether tools are needed).
+
+        The LLM availability probe is deferred until a greeting is actually
+        hit — search queries (the common path) never pay the /v1/models
+        round-trip.
         """
         q = user_input.lower().strip()
         lang = self._detect_language(user_input)
-        llm_ok = self._check_llm()
 
-        # Fast keyword gates FIRST — known greetings never pay an LLM classify
+        # Fast keyword gates FIRST — known greetings never pay an LLM round-trip
         if _is_greeting_query(q):
+            # 仅问候命中时才探测 LLM (探测结果按 base+key 缓存)
+            llm_ok = self._check_llm()
             if llm_ok:
                 return self._generate_greeting(user_input, lang)
             return self._PRESET_GREETING_EN if lang == "en" else self._PRESET_GREETING_ZH
         if any(kw in q for kw in _SYSTEM_KEYWORDS):
             return self._system_info_text(lang)
 
-        # Clearly a search query → proceed to tool routing (no LLM classify)
-        if self._rule_search_hint(q):
-            return None
-
-        # Ambiguous query → LLM intent classification (bounded timeout)
-        if llm_ok:
-            intent = self._llm_classify_intent(user_input)
-            if intent == "greeting":
-                return self._generate_greeting(user_input, lang)
-            if intent == "system":
-                return self._system_info_text(lang)
-            # "search" or None → proceed to search
-
+        # 其余一律进入 LangGraph agent (模糊查询由 DeepSeek 自己决定是否需要工具)
         return None
 
     # -- Preset replies -- used ONLY when the LLM is unavailable -----
@@ -583,15 +693,6 @@ class CrossTableAgent:
         "你好！我是 CorpChat 智能搜索助手。我可以帮你搜索聊天记录和联系人信息。"
         "请问有什么可以帮你的？"
     )
-
-    @staticmethod
-    def _rule_search_hint(q: str) -> bool:
-        """Cheap 'clearly a search query' hint - skips the LLM classify round-trip."""
-        return (
-            any(kw in q for kw in _CONTACT_KEYWORDS)
-            or any(kw in q for kw in _MESSAGE_KEYWORDS)
-            or any(t in q for t in _CROSS_TABLE_TERMS)
-        )
 
     def _check_llm(self) -> bool:
         """Whether the LLM endpoint is reachable (cached per base+key)."""
@@ -610,71 +711,20 @@ class CrossTableAgent:
         _LLM_AVAILABILITY_CACHE[cache_key] = ok
         return ok
 
-    def _llm_classify_intent(self, user_input: str) -> Optional[str]:
-        """Classify intent with the LLM: 'greeting' | 'system' | 'search'.
+    def _generate_greeting(self, user_input: str, lang: str) -> str:
+        """LLM-generated greeting response; preset fallback when LLM is down.
 
-        Returns None when the LLM is unavailable or returns something
-        unrecognized, so the caller can fall back to keyword rules.
+        委托 intent_words.generate_greeting (单一实现, 候选 4)。
         """
         try:
             from .litellm_client import LiteLLMClient
+            from .intent_words import generate_greeting
             client = LiteLLMClient(api_base=self.api_base, api_key=self.api_key)
-            result = client.chat(
-                [
-                    {"role": "system", "content": (
-                        "You are an intent classifier for a chat-search assistant. "
-                        "Classify the user's message into exactly one category:\n"
-                        "- greeting: casual greeting or small talk "
-                        "(hi, hello, how are you, good morning, 你好, 最近怎么样)\n"
-                        "- system: asking about the assistant's capabilities or identity "
-                        "(who are you, what can you do, 你会什么)\n"
-                        "- search: anything requesting information from chat messages or contacts\n"
-                        "Reply with ONLY the category name: greeting, system, or search."
-                    )},
-                    {"role": "user", "content": user_input},
-                ],
-                temperature=0.0,
-                max_tokens=8,
-                timeout=3,
-            )
-            result = (result or "").strip().lower()
-            for intent in ("greeting", "system", "search"):
-                if intent in result:
-                    return intent
-        except Exception as e:
-            logger.debug(f"LLM intent classification failed: {e}")
-        return None
-
-    def _generate_greeting(self, user_input: str, lang: str) -> str:
-        """LLM-generated greeting response; preset fallback when LLM is down."""
-        try:
-            from .litellm_client import LiteLLMClient
-            client = LiteLLMClient(api_base=self.api_base, api_key=self.api_key)
-            lang_name = {
-                "en": "English",
-                "zh-TW": "Traditional Chinese",
-                "zh-CN": "Simplified Chinese",
-            }.get(lang, "English")
-            result = client.chat(
-                [
-                    {"role": "system", "content": (
-                        f"You are CorpChat Intelligence, a friendly enterprise chat-search "
-                        f"assistant. Reply to the user's greeting naturally in {lang_name}. "
-                        f"Keep it short, warm, and context-aware. Do NOT mention that you are "
-                        f"an AI or list capabilities. Briefly invite them to search chat "
-                        f"messages or contacts if they need help."
-                    )},
-                    {"role": "user", "content": user_input or "Hi!"},
-                ],
-                temperature=0.7,
-                max_tokens=80,
-                timeout=5,
-            )
-            if result and result.strip():
-                return result.strip()
+            fallback = self._PRESET_GREETING_EN if lang == "en" else self._PRESET_GREETING_ZH
+            return generate_greeting(client, user_input, lang, fallback=fallback)
         except Exception as e:
             logger.debug(f"LLM greeting generation failed: {e}")
-        return self._PRESET_GREETING_EN if lang == "en" else self._PRESET_GREETING_ZH
+            return self._PRESET_GREETING_EN if lang == "en" else self._PRESET_GREETING_ZH
 
     def _system_info_text(self, lang: str) -> str:
         """Self-description answer. Kept static - only greetings are LLM-generated."""
@@ -712,7 +762,9 @@ class CrossTableAgent:
         import time as _time
         logger.info("Using fallback mode for cross-table agent")
 
-        from .tools import search_messages, search_contacts
+        from .tools import search_messages, search_contacts, configure_search
+        configure_search(expand=self.expand, use_rerank=self.use_rerank,
+                         graph_parallel=self.graph_parallel)
 
         # ── Step 1: Extract the actual search query from the user's question ──
         search_query = self._extract_search_query(user_input)
@@ -726,10 +778,7 @@ class CrossTableAgent:
         try:
             # First: search messages with the extracted query
             _t0 = _time.perf_counter()
-            msg_result = search_messages.invoke(
-                {"query": search_query, "expand": self.expand, "use_rerank": self.use_rerank,
-                 "graph_parallel": self.graph_parallel}
-            )
+            msg_result = search_messages.invoke({"query": search_query})
             _t1 = _time.perf_counter()
             self._add_step("🔍", "search_messages", int((_t1 - _t0) * 1000), f"Query: '{search_query}'")
             from .tools import get_last_search_meta

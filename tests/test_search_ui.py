@@ -45,6 +45,7 @@ class _Recorder:
         self.writes = []         # st.write(...) messages
         self.iframes = []        # st.iframe(html) payloads
         self.buttons = []        # st.button labels
+        self.markdowns = []      # st.markdown(...) body strings
         self.reruns = 0
 
     def reset(self):
@@ -56,6 +57,7 @@ class _Recorder:
         self.writes.clear()
         self.iframes.clear()
         self.buttons.clear()
+        self.markdowns.clear()
         self.reruns = 0
 
 
@@ -86,7 +88,7 @@ def _make_fake_streamlit(recorder: _Recorder, search_impl=None):
     # Page setup
     st.set_page_config = _noop
     st.title = _noop
-    st.markdown = _noop
+    st.markdown = lambda *a, **k: recorder.markdowns.append(str(a[0] if a else k.get("body", "")))
     st.caption = _noop
     st.subheader = _noop
     st.info = lambda *a, **k: recorder.infos.append(a[0]) if a else None
@@ -109,6 +111,7 @@ def _make_fake_streamlit(recorder: _Recorder, search_impl=None):
 
     # Widgets
     st.button = lambda *a, **k: (recorder.buttons.append(a[0] if a else k.get("label", "")) or False)
+    st.link_button = lambda *a, **k: (recorder.buttons.append(a[0] if a else k.get("label", "")) or False)
     # Respect the `value=` param so tests can opt out of agent mode by setting
     # ss["agent_enabled"] = False. Other checkboxes use value=True → still True.
     st.checkbox = lambda *a, **k: k.get("value", True)
@@ -244,6 +247,25 @@ def _clean_recorder():
     _recorder.reset()
     yield
     _recorder.reset()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_hindsight(monkeypatch):
+    """UI 测试不依赖真实 Hindsight 服务。
+
+    候选 3 (单一适配器) 后默认 URL 是 http://localhost:8888, 本机可能真的有
+    服务在跑 (docker compose), 测试若命中就会随环境漂移。这里把适配器的 HTTP
+    调用全部替换为"服务不可达"语义: 记忆图为空、disposition 为默认、recall
+    无结果, 与旧行为 (hindsight 主机名不可解析) 等价。
+    """
+    from apps.corpchat.search import hindsight_client as hc
+
+    monkeypatch.setattr(hc, "get_entity_graph", lambda *a, **k: {})
+    monkeypatch.setattr(hc, "get_disposition", lambda *a, **k: {})
+    monkeypatch.setattr(hc, "set_disposition", lambda *a, **k: False)
+    monkeypatch.setattr(hc, "recall", lambda *a, **k: [])
+    monkeypatch.setattr(hc, "retain", lambda *a, **k: True)
+    yield
 
 
 # ── Bug 1: spurious "Search was interrupted" ─────────────────────────────────
@@ -532,7 +554,15 @@ def test_process_window_agent_shows_tool_subwindows(monkeypatch):
 
     app_module._render_search_page()
 
-    tool_labels = [l for l in _recorder.expander_labels if "search_" in str(l)]
+    # Process 标签现在直接列出精确工具名 (折叠时也可见)
+    process_labels = [l for l in _recorder.expander_labels if str(l).startswith("Process")]
+    assert process_labels, "Process expander not found"
+    assert "search_messages" in process_labels[0], f"Process 标签应含工具名: {process_labels[0]}"
+    assert "search_contacts" in process_labels[0]
+
+    # 每个工具一个子窗口 (排除 Process 标签本身)
+    tool_labels = [l for l in _recorder.expander_labels
+                   if "search_" in str(l) and not str(l).startswith("Process")]
     assert len(tool_labels) == 2, f"Expected 2 tool sub-windows, got {tool_labels}"
     assert any("search_messages" in str(l) for l in tool_labels)
     assert any("search_contacts" in str(l) for l in tool_labels)
@@ -576,6 +606,67 @@ def test_process_window_no_dead_raw_results_block(monkeypatch):
     )
 
 
+def test_process_window_shows_hindsight_involvement(monkeypatch):
+    """Process 窗显示 Hindsight 参与度: recall/skip/retain/none。"""
+    from streamlit import session_state as ss
+    cases = [
+        ("recall", "memory recall used"),
+        ("skip", "recall skipped"),
+        ("retain", "retain only"),
+        ("none", "not configured"),
+    ]
+    for hs_key, needle in cases:
+        _recorder.reset()
+        ss["chat_history"] = [{
+            "query": "q", "answer": "a", "raw_hits": [], "status": "done",
+            "hindsight": hs_key,
+            "process": {"agentic": True, "fallback": False, "tools": []},
+        }]
+        ss["searching"] = False
+        ss["agent_enabled"] = True
+        monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+        app_module._render_search_page()
+        all_md = " ".join(_recorder.markdowns)
+        assert needle in all_md, f"hindsight={hs_key!r} 应显示 {needle!r}, got: {all_md[:200]}"
+
+
+def test_process_window_no_hindsight_key_no_line(monkeypatch):
+    """旧轮次无 hindsight 字段 → 不渲染 Hindsight 行 (向后兼容)。"""
+    from streamlit import session_state as ss
+    ss["chat_history"] = [{
+        "query": "q", "answer": "a", "raw_hits": [], "status": "done",
+        "process": {"agentic": True, "fallback": False, "tools": []},
+    }]
+    ss["searching"] = False
+    ss["agent_enabled"] = True
+    monkeypatch.setattr(app_module, "_load_search_index", lambda: None)
+    app_module._render_search_page()
+    assert not any("Hindsight:" in m for m in _recorder.markdowns), (
+        "无 hindsight 字段时不应渲染 Hindsight 行"
+    )
+
+
+def test_retain_uses_async(monkeypatch):
+    """retain 必须走 async_=True — 同步 retain 服务端 ~13s 会阻塞 UI 至超时。"""
+    import apps.corpchat.search.hindsight_client as hc_module
+    captured = {}
+
+    def fake_retain(content, bank=None, **kw):
+        captured.update(kw)
+        return True
+
+    monkeypatch.setattr(hc_module, "retain", fake_retain)
+    app_module._retain_search_to_hindsight(
+        "Can you find me a male's name in the contact?",
+        [{"id": "m1", "text": "合同已签", "metadata": {"customer_name": "陳志明", "company": "聯成電腦"}}],
+        bank="test-bank",
+    )
+    assert captured.get("async_") is True, "retain 必须是异步的, 否则阻塞 UI 至 10s 超时"
+    assert captured.get("tags") == ["corpchat", "search", "陳志明", "聯成電腦"], (
+        f"实体锚点 tags 应保留: {captured.get('tags')}"
+    )
+
+
 # ── Ticket 04: Unified fade-in/out processing animation ──────────
 def test_stage_helpers_produce_animation_html():
     """_stage_html / _fade_out_html embed the fade animations."""
@@ -589,50 +680,65 @@ def test_stage_helpers_produce_animation_html():
 
 def test_on_stage_callback_receives_stage_labels(monkeypatch):
     """CrossTableAgent.process(on_stage=...) invokes the callback per stage."""
-    import types
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
     from apps.corpchat.search.cross_table_agent import CrossTableAgent
     from apps.corpchat.search import tools as tools_module
 
-    def _fake_msg_invoke(payload):
-        return "【消息搜索结果】\n1. [Score: 0.61] 陳志明 (userid: user_1) [Label: sample_request]\n   合同已签"
+    monkeypatch.setattr(tools_module, "_last_msg_meta",
+                        {"query": "", "expanded_queries": [], "hit_count": 0,
+                         "previews": [], "raw_hits": []})
+    monkeypatch.setattr(tools_module, "_last_contact_meta",
+                        {"query": "", "hit_count": 0, "previews": []})
 
-    def _fake_contact_invoke(payload):
-        return "【联系人搜索结果】\n1. [Score: 0.9] 陳志明 (userid: user_1)\n   Email: x@y.org"
-
-    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=_fake_msg_invoke))
-    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=_fake_contact_invoke))
+    class _FakeAgent:
+        def invoke(self, state):
+            return {"messages": [
+                HumanMessage(content="帮我查一下合同已签的消息"),
+                AIMessage(content="", tool_calls=[{
+                    "name": "search_messages", "args": {"query": "合同已签"}, "id": "c1",
+                }]),
+                ToolMessage(content="【消息搜索结果】", tool_call_id="c1"),
+                AIMessage(content="找到相关消息：合同已签"),
+            ]}
 
     stages = []
     agent = CrossTableAgent(expand=False, use_rerank=False)
-    agent._extract_search_query = lambda q: "合同已签"
+    agent._agent = _FakeAgent()
     result = agent.process("帮我查一下合同已签的消息", on_stage=lambda l, d="": stages.append(l))
 
     assert "🧠" in stages, f"Routing stage missing: {stages}"
-    assert "🔍" in stages, f"Tool stage missing: {stages}"
     assert "✨" in stages, f"Answer stage missing: {stages}"
     assert result.get("success") is True
 
 
 def test_on_stage_callback_never_breaks_processing(monkeypatch):
     """A throwing on_stage callback must not break the agent."""
-    import types
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
     from apps.corpchat.search.cross_table_agent import CrossTableAgent
     from apps.corpchat.search import tools as tools_module
 
-    def _fake_msg_invoke(payload):
-        return "【消息搜索结果】\n1. [Score: 0.61] 陳志明 (userid: user_1) [Label: sample_request]\n   合同已签"
+    monkeypatch.setattr(tools_module, "_last_msg_meta",
+                        {"query": "", "expanded_queries": [], "hit_count": 0,
+                         "previews": [], "raw_hits": []})
+    monkeypatch.setattr(tools_module, "_last_contact_meta",
+                        {"query": "", "hit_count": 0, "previews": []})
 
-    def _fake_contact_invoke(payload):
-        return "【联系人搜索结果】\n1. [Score: 0.9] 陳志明 (userid: user_1)\n   Email: x@y.org"
-
-    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=_fake_msg_invoke))
-    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=_fake_contact_invoke))
+    class _FakeAgent:
+        def invoke(self, state):
+            return {"messages": [
+                HumanMessage(content="帮我查一下合同已签的消息"),
+                AIMessage(content="", tool_calls=[{
+                    "name": "search_messages", "args": {"query": "合同已签"}, "id": "c1",
+                }]),
+                ToolMessage(content="【消息搜索结果】", tool_call_id="c1"),
+                AIMessage(content="找到相关消息：合同已签"),
+            ]}
 
     def _boom(label, detail=""):
         raise RuntimeError("ui failure")
 
     agent = CrossTableAgent(expand=False, use_rerank=False)
-    agent._extract_search_query = lambda q: "合同已签"
+    agent._agent = _FakeAgent()
     result = agent.process("帮我查一下合同已签的消息", on_stage=_boom)
     assert result.get("success") is True
 

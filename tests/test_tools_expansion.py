@@ -13,6 +13,7 @@ Run:
 import json
 import os
 import sys
+import types
 
 import pytest
 
@@ -34,6 +35,20 @@ class _FakeCursor:
         return None
 
     def fetchone(self):
+        if "text, tags" in self._sql:
+            # 真实 txtai sections 表: SELECT text, tags → 两列
+            return ("合同已签，请确认后安排付款。",
+                    json.dumps({
+                        "label": "sample_request",
+                        "customer_name": "陳志明",
+                        "external_userid": "user_1",
+                        "full_name": "陳志明",
+                        "userid": "user_1",
+                        "email": "weiyao@example.org",
+                        "company": "聯成電腦",
+                        "phone": "0912345678",
+                        "job_title": "採購專員",
+                    }, ensure_ascii=False))
         if "tags" in self._sql:
             return (json.dumps({
                 "label": "sample_request",
@@ -102,6 +117,14 @@ def _use_fake_index(monkeypatch):
     monkeypatch.setattr(tools_module, "_load_contacts_index", lambda: _FakeEmbeddings())
 
 
+@pytest.fixture(autouse=True)
+def _reset_config():
+    """Reset the module-level retrieval config between tests (决策 12)."""
+    tools_module.configure_search(expand=False, use_rerank=False, graph_parallel=False)
+    yield
+    tools_module.configure_search(expand=False, use_rerank=False, graph_parallel=False)
+
+
 @pytest.fixture
 def fake_expander():
     return _RecordingExpander()
@@ -124,20 +147,22 @@ class TestSearchMessagesTool:
         assert len(meta["previews"]) == 3
 
     def test_expand_enabled_records_expanded_queries(self, monkeypatch, fake_expander, fake_reranker):
-        """expand=True → expanded queries appear in meta; expander was called."""
+        """expand=True (via configure_search) → expanded queries in meta; expander called."""
         monkeypatch.setattr("apps.corpchat.search.query_expander.QueryExpander",
                             lambda *a, **k: fake_expander)
-        search_messages.invoke({"query": "合同已签", "expand": True, "use_rerank": False})
+        tools_module.configure_search(expand=True, use_rerank=False)
+        search_messages.invoke({"query": "合同已签"})
         meta = tools_module.get_last_search_meta()
         assert fake_expander.calls == ["合同已签"], f"Expander not called: {fake_expander.calls}"
         assert meta["expanded_queries"] == ["合约确认", "合同 签署"]
         assert meta["hit_count"] == 3
 
     def test_rerank_enabled_calls_reranker(self, monkeypatch, fake_reranker):
-        """use_rerank=True → Reranker invoked; results still returned."""
+        """use_rerank=True (via configure_search) → Reranker invoked; results returned."""
         monkeypatch.setattr("apps.corpchat.search.reranker.Reranker",
                             lambda *a, **k: fake_reranker)
-        result = search_messages.invoke({"query": "合同已签", "expand": False, "use_rerank": True})
+        tools_module.configure_search(expand=False, use_rerank=True)
+        result = search_messages.invoke({"query": "合同已签"})
         assert fake_reranker.calls == 1, "Reranker not called"
         assert "合同已签" in result
 
@@ -149,7 +174,8 @@ class TestSearchMessagesTool:
 
         monkeypatch.setattr("apps.corpchat.search.query_expander.QueryExpander",
                             lambda *a, **k: _BoomExpander())
-        result = search_messages.invoke({"query": "合同已签", "expand": True, "use_rerank": False})
+        tools_module.configure_search(expand=True, use_rerank=False)
+        result = search_messages.invoke({"query": "合同已签"})
         meta = tools_module.get_last_search_meta()
         assert "合同已签" in result
         assert meta["expanded_queries"] == []
@@ -171,66 +197,40 @@ class TestSearchContactsTool:
         assert meta["hit_count"] == 3
 
 
-# ── CrossTableAgent forwarding ───────────────────────────────────
+# ── CrossTableAgent forwarding (via configure_search, 决策 12) ────
 class TestAgentForwarding:
-    def test_agent_forwards_expand_and_rerank_to_messages_only(self, monkeypatch):
-        """CrossTableAgent forwards expand/use_rerank to search_messages but not contacts."""
-        import types
+    def test_agent_injects_expand_and_rerank_config(self, monkeypatch):
+        """CrossTableAgent 构建时把 expand/use_rerank 注入模块级配置 (决策 12)。"""
         from apps.corpchat.search.cross_table_agent import CrossTableAgent
 
-        msg_kwargs = {}
-        contact_kwargs = {}
-
-        def _fake_msg_invoke(payload):
-            msg_kwargs.update(payload)
-            return "【消息搜索结果】\n1. [Score: 0.61] 陳志明 (userid: user_1) [Label: sample_request]\n   合同已签"
-
-        def _fake_contact_invoke(payload):
-            contact_kwargs.update(payload)
-            return "【联系人搜索结果】\n1. [Score: 0.9] 陳志明 (userid: user_1)\n   Email: x@y.org"
-
-        # The agent does `from .tools import search_messages` inside process(),
-        # so patching the tools module attributes is picked up.
-        monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=_fake_msg_invoke))
-        monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=_fake_contact_invoke))
+        injected = {}
+        monkeypatch.setattr(tools_module, "configure_search",
+                            lambda **kw: injected.update(kw))
 
         agent = CrossTableAgent(expand=True, use_rerank=True)
-        agent._extract_search_query = lambda q: "合同已签"
-        result = agent.process("帮我查一下合同已签的消息")
+        agent._init_agent()
 
-        assert msg_kwargs.get("expand") is True, f"search_messages not told to expand: {msg_kwargs}"
-        assert msg_kwargs.get("use_rerank") is True, f"search_messages not told to rerank: {msg_kwargs}"
-        assert "expand" not in contact_kwargs, f"search_contacts got expand: {contact_kwargs}"
-        assert result.get("success") is True
+        assert injected.get("expand") is True, f"expand not injected: {injected}"
+        assert injected.get("use_rerank") is True, f"use_rerank not injected: {injected}"
 
-    def test_agent_disabled_toggles_not_forwarded(self, monkeypatch):
-        """expand/use_rerank False → search_messages invoked with False."""
-        import types
+    def test_agent_disabled_toggles_injected_false(self, monkeypatch):
+        """expand/use_rerank False → configure_search 收到 False。"""
         from apps.corpchat.search.cross_table_agent import CrossTableAgent
 
-        msg_kwargs = {}
-
-        def _fake_msg_invoke(payload):
-            msg_kwargs.update(payload)
-            return "【消息搜索结果】\n1. [Score: 0.61] 陳志明 (userid: user_1) [Label: sample_request]\n   合同已签"
-
-        def _fake_contact_invoke(payload):
-            return "【联系人搜索结果】\n1. [Score: 0.9] 陳志明 (userid: user_1)\n   Email: x@y.org"
-
-        monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=_fake_msg_invoke))
-        monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=_fake_contact_invoke))
+        injected = {}
+        monkeypatch.setattr(tools_module, "configure_search",
+                            lambda **kw: injected.update(kw))
 
         agent = CrossTableAgent(expand=False, use_rerank=False)
-        agent._extract_search_query = lambda q: "合同已签"
-        result = agent.process("帮我查一下合同已签的消息")
+        agent._init_agent()
 
-        assert msg_kwargs.get("expand") is False
-        assert msg_kwargs.get("use_rerank") is False
+        assert injected.get("expand") is False
+        assert injected.get("use_rerank") is False
 
 
 # ═══════════════ Ticket 02: graph_parallel threading (tool) ═══════════════
 def test_search_messages_accepts_and_forwards_graph_parallel(monkeypatch):
-    """search_messages 接受 graph_parallel 并透传给 RRF 融合路径 (expand 分支)。"""
+    """search_messages 读取模块级 graph_parallel 并透传给 RRF 融合路径 (expand 分支)。"""
     calls = []
 
     def _recording_fuse(embeddings, queries_with_weights, limit=10, **kw):
@@ -238,31 +238,25 @@ def test_search_messages_accepts_and_forwards_graph_parallel(monkeypatch):
         return []
 
     monkeypatch.setattr(tools_module, "_weighted_rrf_fuse", _recording_fuse)
-    search_messages.invoke({"query": "跟誰聊過物流", "expand": True, "graph_parallel": True})
+    tools_module.configure_search(expand=True, graph_parallel=True)
+    search_messages.invoke({"query": "跟誰聊過物流"})
 
     assert calls, "expand 分支应调用 _weighted_rrf_fuse"
     assert calls[0].get("graph_parallel") is True, f"graph_parallel 未透传: {calls[0]}"
 
 
-def test_cross_table_agent_forwards_graph_parallel(monkeypatch):
-    """CrossTableAgent(graph_parallel=True) → search_messages 带 graph_parallel=True。"""
-    import types
+def test_cross_table_agent_injects_graph_parallel(monkeypatch):
+    """CrossTableAgent(graph_parallel=True) → configure_search 收到 graph_parallel=True。"""
     from apps.corpchat.search.cross_table_agent import CrossTableAgent
 
-    msg_kwargs = {}
-
-    def _fake_msg_invoke(payload):
-        msg_kwargs.update(payload)
-        return "【消息搜索结果】\n1. [Score: 0.61] 陳志明 (userid: user_1) [Label: sample_request]\n   合同已签"
-
-    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=_fake_msg_invoke))
-    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=lambda p: ""))
+    injected = {}
+    monkeypatch.setattr(tools_module, "configure_search",
+                        lambda **kw: injected.update(kw))
 
     agent = CrossTableAgent(graph_parallel=True)
-    agent._extract_search_query = lambda q: "跟誰聊過物流"
-    agent.process("跟誰聊過物流")
+    agent._init_agent()
 
-    assert msg_kwargs.get("graph_parallel") is True, f"graph_parallel 未转发: {msg_kwargs}"
+    assert injected.get("graph_parallel") is True, f"graph_parallel 未注入: {injected}"
 
 
 def test_format_citations_builds_source_block():
@@ -279,45 +273,30 @@ def test_format_citations_builds_source_block():
 
 
 def test_cross_table_agent_contacts_gated_by_sources(monkeypatch):
-    """sources 不含 contacts → 不调用 search_contacts (跨表查询仍走消息)。"""
-    import types
+    """sources 不含 contacts → 绑定给 agent 的工具集不含 search_contacts。"""
     from apps.corpchat.search.cross_table_agent import CrossTableAgent
 
-    calls = []
-
-    def _fake_msg_invoke(payload):
-        calls.append("msg")
-        return "【消息搜索结果】\n1. [Score: 0.61] 陳志明 (userid: user_1)\n   合同已签"
-
-    def _fake_contact_invoke(payload):
-        calls.append("contact")
-        return "【联系人搜索结果】"
-
-    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=_fake_msg_invoke))
-    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=_fake_contact_invoke))
-
     agent = CrossTableAgent(sources=["messages"])
-    agent._extract_search_query = lambda q: "發'合同已簽'消息的人"
-    agent.process("發'合同已簽'消息的人，他的聯絡方式")
+    # 让 create_react_agent 不真正构建 (monkeypatch), 只验证工具筛选
+    captured = {}
+    monkeypatch.setattr(
+        "apps.corpchat.search.cross_table_agent.create_react_agent",
+        lambda model, tools, prompt=None: captured.update({"tools": tools}) or object(),
+    )
+    agent._init_agent()
 
-    assert "msg" in calls, "messages 源应被搜索"
-    assert "contact" not in calls, f"sources 排除 contacts 仍调用了 search_contacts: {calls}"
+    names = [t.name for t in captured.get("tools", [])]
+    assert "search_messages" in names, f"messages 源应有 search_messages: {names}"
+    assert "search_conversation_partners" in names, f"messages 源应有关系工具: {names}"
+    assert "search_contacts" not in names, f"sources 排除 contacts 仍绑定: {names}"
 
 
-def test_contact_name_query_routes_to_contacts():
-    """'姓名/联系人' 类查询应路由到 search_contacts, 而非默认回退 search_messages。"""
-    from apps.corpchat.search.cross_table_agent import _LiteLLMWrapper
+def test_contact_name_query_uses_search_contacts_tool():
+    """联系人姓名类查询由 search_contacts 工具服务 (主路径由 DeepSeek 路由)。"""
+    from apps.corpchat.search.tools import CROSS_TABLE_TOOLS
 
-    w = _LiteLLMWrapper(api_base="", api_key="", model="test")
-    queries = [
-        "Give me one example of male's name in the contact",
-        "给我一个男生的姓名",
-        "联系人的名字",
-    ]
-    for q in queries:
-        names = [c["name"] for c in w._decide_tool_calls(q)]
-        assert "search_contacts" in names, f"{q} 应路由到 contacts: {names}"
-        assert "search_messages" not in names, f"{q} 不应路由到 messages: {names}"
+    names = [t.name for t in CROSS_TABLE_TOOLS]
+    assert "search_contacts" in names, f"工具集应包含 search_contacts: {names}"
 
 
 def test_search_messages_graph_parallel_without_expand_calls_graph_path(monkeypatch):
@@ -334,8 +313,9 @@ def test_search_messages_graph_parallel_without_expand_calls_graph_path(monkeypa
         return None  # 无图结果 → 回退直接文档
 
     monkeypatch.setattr(Searcher, "_graph_parallel_entry", _fake_entry)
+    tools_module.configure_search(expand=False, graph_parallel=True)
 
-    result = search_messages.invoke({"query": "跟誰聊過物流", "graph_parallel": True})
+    result = search_messages.invoke({"query": "跟誰聊過物流"})
     assert called == ["跟誰聊過物流"], f"图并行入口应被调用: {called}"
     assert "【消息搜索结果】" in result, "图路为空时应回退直接搜索"
 
@@ -358,26 +338,31 @@ def test_cross_table_agent_exposes_raw_hits(monkeypatch):
 
     确保 agent 路径 (深度模式) 的记忆图谱也有数据来源。
     """
-    import types
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
     from apps.corpchat.search.cross_table_agent import CrossTableAgent
 
-    def _fake_msg_invoke(payload):
-        return "【消息搜索结果】\n1. [Score: 0.61] 高健銘 (userid: user_1) [Label: old_friend_reconnect]\n   合同已签"
-
-    def _fake_contact_invoke(payload):
-        return ""
-
-    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=_fake_msg_invoke))
-    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=_fake_contact_invoke))
     monkeypatch.setattr(tools_module, "_last_msg_meta", {
         "query": "合同已签", "expanded_queries": [], "hit_count": 1, "previews": [],
         "raw_hits": [{"id": "m1", "text": "合同已签", "score": 0.61,
                       "metadata": {"customer_name": "高健銘", "company": "DCH",
                                    "label": "old_friend_reconnect", "open_kfid": "k1"}}],
     })
+    monkeypatch.setattr(tools_module, "_last_contact_meta",
+                        {"query": "", "hit_count": 0, "previews": []})
+
+    class _FakeAgent:
+        def invoke(self, state):
+            return {"messages": [
+                HumanMessage(content="帮我查一下合同已签的消息"),
+                AIMessage(content="", tool_calls=[{
+                    "name": "search_messages", "args": {"query": "合同已签"}, "id": "c1",
+                }]),
+                ToolMessage(content="【消息搜索结果】", tool_call_id="c1"),
+                AIMessage(content="找到了 1 条相关消息"),
+            ]}
 
     agent = CrossTableAgent(expand=False, use_rerank=False)
-    agent._extract_search_query = lambda q: "合同已签"
+    agent._agent = _FakeAgent()
     result = agent.process("帮我查一下合同已签的消息")
 
     hits = result.get("raw_hits", [])
@@ -386,20 +371,14 @@ def test_cross_table_agent_exposes_raw_hits(monkeypatch):
     assert result.get("success") is True
 
 
-# ═══════════════ SQL 结构化检索 (search_messages_where) ═══════════════
-def test_structured_link_query_routes_to_search_messages_where():
-    """含 link/URL 的消息查询 → SQL 结构化检索, 不走语义向量。"""
-    from apps.corpchat.search.cross_table_agent import _LiteLLMWrapper
-    w = _LiteLLMWrapper(api_base="", api_key="", model="test")
+# ═══════════════ SQL 结构化检索 (search_messages_where, 降级路径) ═══════════════
+def test_structured_link_query_schema_available():
+    """search_messages_where 仍可导入 (降级路径保留), 但不在主路径工具集。"""
+    from apps.corpchat.search.tools import search_messages_where, CROSS_TABLE_TOOLS
 
-    for q in ("search for messages containing a link please",
-              "search for messages containing a URL please",
-              "找一下含網址的消息"):
-        names = [c["name"] for c in w._decide_tool_calls(q)]
-        assert "search_messages_where" in names, f"{q!r} should route to structured tool: {names}"
-
-    # 非结构化查询不受影响
-    assert w._decide_tool_calls("李雅婷的邮箱是什么")[0]["name"] == "search_contacts"
+    names = [t.name for t in CROSS_TABLE_TOOLS]
+    assert "search_messages_where" not in names, "结构化工具不应暴露给主路径 LLM"
+    assert search_messages_where.name == "search_messages_where"
 
 
 def test_search_messages_where_returns_db_rows(monkeypatch):
@@ -475,32 +454,125 @@ def test_search_messages_where_falls_back_to_index_scan_when_db_down(monkeypatch
     assert meta["hit_count"] == 2
 
 
-def test_cross_table_agent_uses_structured_tool_for_link_query(monkeypatch):
-    """Agent 对含链接查询调用 search_messages_where 并暴露 raw_hits。"""
-    import types
+def test_cross_table_agent_fallback_keeps_structured_tool_available(monkeypatch):
+    """search_messages_where 保留在降级路径 (可导入, 不被主路径绑定)。"""
+    from apps.corpchat.search.tools import search_messages_where
     from apps.corpchat.search.cross_table_agent import CrossTableAgent
 
-    calls = []
+    # 降级路径 (_fallback_process) 仍使用 search_messages_where 的能力:
+    # 它通过 configure_search 注入 + search_messages 走语义检索; 结构化工具
+    # 依然可独立调用 (含链接查询)。
+    res = search_messages_where.invoke({"condition": "messages containing a link"})
+    assert isinstance(res, str)
+    assert res.strip(), "结构化工具降级路径仍应可用"
 
-    def _fake_where_invoke(payload):
-        calls.append(payload.get("condition"))
-        return ("【结构化匹配】\n1. [Match] user_高健銘_i-chunli (userid: user_高健銘_i-chunli) "
-                "[Label: old_friend_reconnect] [2026-01-01T10:00:00]\n   看看 https://tinyurl.com/2p9demo")
 
-    monkeypatch.setattr(tools_module, "search_messages_where", types.SimpleNamespace(invoke=_fake_where_invoke))
-    monkeypatch.setattr(tools_module, "search_messages", types.SimpleNamespace(invoke=lambda p: ""))
-    monkeypatch.setattr(tools_module, "search_contacts", types.SimpleNamespace(invoke=lambda p: ""))
-    monkeypatch.setattr(tools_module, "_last_msg_meta", {
-        "query": "", "expanded_queries": [], "hit_count": 1, "previews": [],
-        "raw_hits": [{"id": "m1", "text": "https://tinyurl.com/2p9demo", "score": 0.0,
-                      "metadata": {"customer_name": "高健銘", "label": "old_friend_reconnect"}}],
-    })
+# ── Ticket 02: Hindsight retain 实体锚点 (extract_entity_tags) ─────
+class TestExtractEntityTags:
+    """从 raw_hits metadata 提取实体名, 供 Hindsight retain tags 使用。"""
 
-    agent = CrossTableAgent(expand=False, use_rerank=False)
-    agent._llm_summarize = lambda q, msg, contact: "含链接的消息: 高健銘"
-    result = agent.process("search for messages containing a link please")
+    def _hits(self, *metas):
+        return [{"id": f"m{i}", "text": "x", "score": 0.5, "metadata": m}
+                for i, m in enumerate(metas)]
 
-    assert calls, "structured tool 未被调用"
-    assert result.get("raw_hits"), "结构化结果应暴露 raw_hits 供图谱使用"
-    assert result.get("success") is True
+    def test_customer_and_company_extracted(self):
+        from apps.corpchat.search.tools import extract_entity_tags
+        hits = self._hits({"customer_name": "陳志明", "company": "聯成電腦"})
+        assert extract_entity_tags(hits) == ["陳志明", "聯成電腦"]
+
+    def test_dedup_preserves_order(self):
+        from apps.corpchat.search.tools import extract_entity_tags
+        hits = self._hits(
+            {"customer_name": "陳志明", "company": "聯成電腦"},
+            {"customer_name": "陳志明", "company": "聯成電腦"},
+        )
+        assert extract_entity_tags(hits) == ["陳志明", "聯成電腦"]
+
+    def test_customer_name_fallback_to_external_userid(self):
+        from apps.corpchat.search.tools import extract_entity_tags
+        hits = self._hits({"external_userid": "user_1", "company": ""})
+        assert extract_entity_tags(hits) == ["user_1"]
+
+    def test_cap_at_five(self):
+        from apps.corpchat.search.tools import extract_entity_tags
+        metas = [{"customer_name": f"客戶{i}", "company": f"公司{i}"} for i in range(5)]
+        tags = extract_entity_tags(self._hits(*metas))
+        assert len(tags) == 5
+        assert len(set(tags)) == len(tags), "不应有重复"
+
+    def test_empty_or_malformed_inputs(self):
+        from apps.corpchat.search.tools import extract_entity_tags
+        assert extract_entity_tags([]) == []
+        assert extract_entity_tags(None) == []
+        assert extract_entity_tags([{"id": "m", "text": "x", "score": 0.1}]) == []
+        assert extract_entity_tags([None, "junk", {"metadata": "not-dict"}]) == []
+
+    def test_blank_values_skipped(self):
+        from apps.corpchat.search.tools import extract_entity_tags
+        hits = self._hits({"customer_name": "  ", "company": "  聯成電腦  "})
+        assert extract_entity_tags(hits) == ["聯成電腦"]
+
+
+# ── HF 缓存自动离线检测 (apps.corpchat.hf_offline) ─────────────────
+class TestHfCacheHasModel:
+    """纯文件系统检测: 缓存里有非空快照 → 自动离线; 缺失/空 → 在线。"""
+
+    @staticmethod
+    def _seed_cache(tmp_path, model_id, with_file=True):
+        """构造 hub/models--<id>/snapshots/<sha>/ 结构 (with_file=False 时空快照)。"""
+        snap = tmp_path / "hub" / ("models--" + model_id.replace("/", "--")) / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        if with_file:
+            (snap / "config.json").write_text("{}")
+        return tmp_path
+
+    def test_detects_cached_model(self, tmp_path, monkeypatch):
+        from apps.corpchat.hf_offline import _hf_cache_has_model
+        self._seed_cache(tmp_path, "BAAI/bge-m3")
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+        assert _hf_cache_has_model("BAAI/bge-m3") is True
+
+    def test_missing_model_returns_false(self, tmp_path, monkeypatch):
+        from apps.corpchat.hf_offline import _hf_cache_has_model
+        self._seed_cache(tmp_path, "BAAI/bge-m3")
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+        assert _hf_cache_has_model("BAAI/bge-m3") is True
+        assert _hf_cache_has_model("other/model") is False
+
+    def test_empty_snapshot_not_cached(self, tmp_path, monkeypatch):
+        from apps.corpchat.hf_offline import _hf_cache_has_model
+        self._seed_cache(tmp_path, "BAAI/bge-m3", with_file=False)
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+        assert _hf_cache_has_model("BAAI/bge-m3") is False
+
+    def test_no_cache_dir_returns_false(self, tmp_path, monkeypatch):
+        from apps.corpchat.hf_offline import _hf_cache_has_model
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "nope"))
+        assert _hf_cache_has_model("BAAI/bge-m3") is False
+
+    def test_apply_auto_offline_sets_env_when_cached(self, tmp_path, monkeypatch):
+        from apps.corpchat.hf_offline import apply_auto_offline
+        self._seed_cache(tmp_path, "BAAI/bge-m3")
+        self._seed_cache(tmp_path, "BAAI/bge-reranker-base")
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        apply_auto_offline()
+        assert os.environ.get("HF_HUB_OFFLINE") == "1"
+
+    def test_apply_auto_offline_respects_explicit_env(self, tmp_path, monkeypatch):
+        from apps.corpchat.hf_offline import apply_auto_offline
+        self._seed_cache(tmp_path, "BAAI/bge-m3")
+        self._seed_cache(tmp_path, "BAAI/bge-reranker-base")
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+        monkeypatch.setenv("HF_HUB_OFFLINE", "0")  # 显式在线 → 不覆盖
+        apply_auto_offline()
+        assert os.environ.get("HF_HUB_OFFLINE") == "0"
+
+    def test_apply_auto_offline_no_env_when_missing(self, tmp_path, monkeypatch):
+        from apps.corpchat.hf_offline import apply_auto_offline
+        self._seed_cache(tmp_path, "BAAI/bge-m3")  # 只缓存一个 → 不设离线
+        monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        apply_auto_offline()
+        assert os.environ.get("HF_HUB_OFFLINE") is None
 

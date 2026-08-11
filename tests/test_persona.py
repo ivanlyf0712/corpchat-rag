@@ -165,3 +165,107 @@ def test_cross_table_summarize_applies_profile(monkeypatch):
     out = agent._llm_summarize("問題", "msg結果", "contact結果")
     assert out == "answer"
     assert "情緒" in captured["system"]
+
+
+# ── Hindsight adapter consumption (candidate 3: 单一适配器) ───────
+def test_from_hindsight_consumes_adapter(monkeypatch):
+    """from_hindsight 经 hindsight_client.get_disposition 读取, 不再自带 HTTP。"""
+    from apps.corpchat.search import hindsight_client
+    from apps.corpchat.search.persona import DispositionProfile
+
+    captured = {}
+
+    def _fake_get_disposition(bank=None):
+        captured["bank"] = bank
+        return {"skepticism": 5, "literality": 1, "empathy": 3}
+
+    monkeypatch.setattr(hindsight_client, "get_disposition", _fake_get_disposition)
+
+    profile = DispositionProfile.from_hindsight("test-bank")
+
+    assert captured["bank"] == "test-bank"
+    assert profile.skepticism == 1.0   # (5-1)/4
+    assert profile.literality == 0.0   # (1-1)/4
+    assert profile.empathy == 0.5      # (3-1)/4
+    assert profile.style == "balanced"
+
+
+def test_sync_to_hindsight_consumes_adapter(monkeypatch):
+    """sync_to_hindsight 经 hindsight_client.set_disposition 写回 (1-5 钳制)。"""
+    from apps.corpchat.search import hindsight_client
+    from apps.corpchat.search.persona import DispositionProfile
+
+    captured = {}
+
+    def _fake_set_disposition(skepticism=None, literality=None, empathy=None, bank=None):
+        captured.update(skepticism=skepticism, literality=literality,
+                        empathy=empathy, bank=bank)
+        return True
+
+    monkeypatch.setattr(hindsight_client, "set_disposition", _fake_set_disposition)
+
+    ok = DispositionProfile(skepticism=1.0, literality=0.0, empathy=0.5).sync_to_hindsight("b1")
+
+    assert ok is True
+    assert captured["bank"] == "b1"
+    assert captured["skepticism"] == 5   # 1.0*4+1
+    assert captured["literality"] == 1   # 0.0*4+1
+    assert captured["empathy"] == 3      # 0.5*4+1
+
+
+def test_recall_gate_lives_in_hindsight_adapter():
+    """gate 谓词唯一实现位于 hindsight_client.needs_recall; agent 侧仅为别名。"""
+    from apps.corpchat.search import hindsight_client
+    from apps.corpchat.search.cross_table_agent import _needs_hindsight_recall
+
+    assert hindsight_client.needs_recall("记得上次说的报价吗") is True
+    assert hindsight_client.needs_recall("李雅婷的邮箱是什么？") is False
+    assert hindsight_client.needs_recall("search beforehand please") is False
+    # agent 侧引用同一实现
+    assert _needs_hindsight_recall is hindsight_client.needs_recall
+
+
+
+# ── Candidate 5: CorpChat persistence owns its module ──────────────
+def test_corpchat_persistence_split():
+    """实现归属 core.corpchat_db; core.db 仅向后兼容 re-export。"""
+    import core.db as db
+    import core.corpchat_db as corpchat_db
+
+    assert db.load_agent_memory is corpchat_db.load_agent_memory
+    assert db.save_agent_memory is corpchat_db.save_agent_memory
+    assert db.load_disposition_profile is corpchat_db.load_disposition_profile
+    assert db.save_disposition_profile is corpchat_db.save_disposition_profile
+    assert db.load_agent_config is corpchat_db.load_agent_config
+    assert db.save_agent_config is corpchat_db.save_agent_config
+    assert db.load_memory_graph is corpchat_db.load_memory_graph
+    assert db.save_memory_graph is corpchat_db.save_memory_graph
+    # 连接入口在调用时经 core.db.get_db_connection 解析 → 测试 monkeypatch 仍生效
+    assert corpchat_db._conn.__globals__["_db"] is db
+
+
+def test_db_connection_fails_fast_without_password():
+    """DB_PASSWORD 缺失 → get_db_connection fail-fast (P0 security fix)。
+
+    其他测试模块 (test_app_search / test_search_ui) 在模块级把
+    core.db.get_db_connection 换成 fake 且不还原, 因此这里 reload 取回真实
+    实现再断言, 结束后还原被替换的 fake, 不影响后续测试。
+    """
+    import importlib
+    import core.db as db
+    from unittest.mock import patch
+
+    saved = db.get_db_connection
+    importlib.reload(db)
+    try:
+        with patch.object(db, "DB_CONFIG",
+                          {"host": "localhost", "port": 5432, "user": "ocr",
+                           "password": "", "dbname": "invoices"}):
+            try:
+                db.get_db_connection()
+                assert False, "缺少 DB_PASSWORD 时应抛错而非连接"
+            except RuntimeError as e:
+                assert "DB_PASSWORD" in str(e)
+    finally:
+        db.get_db_connection = saved
+

@@ -22,10 +22,17 @@ from .config import (
     TEMPORAL_LIMIT_SCALE,
     logger,
 )
+from .tools import _TXTAI_LOCK, _fetch_doc_metadata
 from .query_expander import QueryExpander
 from .reranker import Reranker
 from .temporal import TimeExpressionParser, TimeWindow
 from .utils import _segment
+
+
+def _locked_emb_search(embeddings, *args, **kwargs):
+    """Thread-safe txtai search (共用 tools._TXTAI_LOCK; Streamlit 多线程防护)."""
+    with _TXTAI_LOCK:
+        return embeddings.search(*args, **kwargs)
 
 
 class Searcher:
@@ -74,6 +81,64 @@ class Searcher:
         return [(did, scores[did]) for did in sorted_ids]
 
     # ── 多路检索组装 (RRF 融合输入) ─────────────────────────────
+    def _assemble_results(
+        self,
+        queries_with_weights: List[Tuple[str, float]],
+        limit: int,
+        graph_parallel: bool = False,
+        where: Optional[str] = None,
+        scale: float = 3.0,
+        weights: Optional[Tuple[float, float]] = None,
+        original_query: str = "",
+    ) -> List[Tuple[List[Tuple[str, float]], float]]:
+        """对一组 (查询, 权重) 逐条执行 txtai 搜索, 组装 RRF 融合输入。
+
+        这是多路检索的单一组装点 (skeleton seam): 未来新增检索路在这里
+        追加一个 (结果列表, 权重) 条目即可。`search()` 与 agent 工具
+        (`tools._weighted_rrf_fuse` → `search_queries`) 共用它, 避免两处
+        重复的检索循环。
+
+        where: 可选的 txtai SQL WHERE 片段 (sender/receiver 元数据过滤)。
+               设置后每条扩展查询都经该过滤, 并跳过图并行路 (图路无法应用
+               元数据过滤, 会泄露被排除的 chunk)。
+        """
+        all_results: List[Tuple[List[Tuple[str, float]], float]] = []
+        for q, q_weight in queries_with_weights:
+            try:
+                if where:
+                    raw = _locked_emb_search(
+                        self.embeddings,
+                        "select id, text, score from txtai where similar(:q) and " + where,
+                        parameters={"q": _segment(q)},
+                        limit=min(int(limit * scale), MAX_SEARCH_LIMIT),
+                    )
+                else:
+                    raw = _locked_emb_search(
+                        self.embeddings, _segment(q),
+                        limit=min(int(limit * scale), MAX_SEARCH_LIMIT), weights=weights,
+                    )
+            except Exception as e:
+                logger.warning(f"Expanded query search failed ({q!r}): {e}")
+                raw = []
+            result_list: List[Tuple[str, float]] = []
+            for item in raw:
+                parsed = self._parse_txtai_result(item)
+                if parsed:
+                    result_list.append((parsed["id"], parsed["score"]))
+            all_results.append((result_list, q_weight))
+
+        # 图并行检索路 (opt-in): 结构性邻居作为独立信号参与融合。
+        # 有 where 过滤时跳过: 图路无法应用元数据过滤, 会泄露被排除的 chunk。
+        if graph_parallel and not where:
+            src = original_query or (queries_with_weights[0][0] if queries_with_weights else "")
+            entry = self._graph_parallel_entry(src, limit)
+            if entry is not None:
+                all_results.append(entry)
+        elif graph_parallel and where:
+            logger.info("graph_parallel skipped: metadata filter (where) cannot be applied to graph path")
+
+        return all_results
+
     def _retrieve_parallel(
         self,
         query: str,
@@ -82,6 +147,7 @@ class Searcher:
         expand: bool = True,
         scale: float = 3.0,
         graph_parallel: bool = False,
+        where: Optional[str] = None,
     ) -> List[Tuple[List[Tuple[str, float]], float]]:
         """
         组装加权 RRF 融合输入: 每条扩展查询一路结果。
@@ -97,6 +163,7 @@ class Searcher:
         调用方传入更大的 scale 以避免窗口过滤饿死结果。
         graph_parallel: 图遍历作为独立检索路参与 RRF 融合 (默认关闭,
         append-only 图扩展保持为默认行为, 见 ADR-0001)。
+        where: 可选 txtai SQL WHERE 片段 (见 _assemble_results)。
         """
         queries_with_weights: List[Tuple[str, float]] = [(query, ORIGINAL_QUERY_WEIGHT)]
         try:
@@ -105,25 +172,43 @@ class Searcher:
         except Exception as e:
             logger.warning(f"查询扩展失败: {e}")
 
-        all_results: List[Tuple[List[Tuple[str, float]], float]] = []
-        for q, q_weight in queries_with_weights:
-            raw = self.embeddings.search(
-                _segment(q), limit=min(int(limit * scale), MAX_SEARCH_LIMIT), weights=weights
-            )
-            result_list: List[Tuple[str, float]] = []
-            for item in raw:
-                parsed = self._parse_txtai_result(item)
-                if parsed:
-                    result_list.append((parsed["id"], parsed["score"]))
-            all_results.append((result_list, q_weight))
+        return self._assemble_results(
+            queries_with_weights, limit,
+            graph_parallel=graph_parallel, where=where, scale=scale,
+            weights=weights, original_query=query,
+        )
 
-        # 图并行检索路 (opt-in): 结构性邻居作为独立信号参与融合
-        if graph_parallel:
-            entry = self._graph_parallel_entry(query, limit)
-            if entry is not None:
-                all_results.append(entry)
+    def search_queries(
+        self,
+        queries_with_weights: List[Tuple[str, float]],
+        limit: int = 10,
+        graph_parallel: bool = False,
+        where: Optional[str] = None,
+    ) -> List[Dict]:
+        """融合调用方显式给出的一组 (查询, 权重) — 检索组装 seam 的对外接口。
 
-        return all_results
+        agent 工具 (`tools.search_messages`) 经此走与 `Searcher.search()` 完全
+        相同的检索循环 / RRF / 图并行路, 不再自带一套复制品。行为与旧的
+        `tools._weighted_rrf_fuse` 一致: 无 graph_expand (append-only 扩展是
+        search() 的职责), 无重排 (由调用方决定), 无 label/date 后置过滤
+        (元数据过滤经 where 表达)。
+        """
+        all_results = self._assemble_results(
+            queries_with_weights, limit,
+            graph_parallel=graph_parallel, where=where,
+            original_query=queries_with_weights[0][0] if queries_with_weights else "",
+        )
+        fused = self._weighted_rrf_fusion(all_results)
+        output: List[Dict] = []
+        seen_ids = set()
+        for doc_id, _ in fused:
+            if doc_id in seen_ids:
+                continue
+            seen_ids.add(doc_id)
+            doc = self._fetch_one_doc(doc_id)
+            if doc:
+                output.append(doc)
+        return output
 
     # ── 纯时序判定 & 时序列表检索 ──────────────────────────────
     @staticmethod
@@ -156,9 +241,13 @@ class Searcher:
             db = self.embeddings.database
             if db is None:
                 return []
-            cur = db.connection.cursor()
-            cur.execute("SELECT id, tags FROM sections")
-            rows = cur.fetchall()
+            with _TXTAI_LOCK:
+                cur = db.connection.cursor()
+                try:
+                    cur.execute("SELECT id, tags FROM sections")
+                    rows = cur.fetchall()
+                finally:
+                    cur.close()
 
             candidates: List[Tuple[str, str]] = []  # (send_time, doc_id), 倒序
             for doc_id, tags_json in rows:
@@ -198,7 +287,7 @@ class Searcher:
         if not query:
             return query_scores
         try:
-            q_raw = self.embeddings.search(_segment(query), limit=MAX_SEARCH_LIMIT)
+            q_raw = _locked_emb_search(self.embeddings, _segment(query), limit=MAX_SEARCH_LIMIT)
             for item in q_raw:
                 parsed = self._parse_txtai_result(item)
                 if parsed:
@@ -441,9 +530,13 @@ class Searcher:
             if db is None:
                 return None
             conn = db.connection
-            cur = conn.cursor()
-            cur.execute("SELECT text, tags FROM sections WHERE id = ?", (doc_id,))
-            row = cur.fetchone()
+            with _TXTAI_LOCK:
+                cur = conn.cursor()
+                try:
+                    cur.execute("SELECT text, tags FROM sections WHERE id = ?", (doc_id,))
+                    row = cur.fetchone()
+                finally:
+                    cur.close()
             if not row:
                 return None
             text, tags_json = row
@@ -539,7 +632,7 @@ class Searcher:
 
         # ── 路径 A: 直接 txtai 搜索 ──
         if not expand or not self.expander:
-            raw = self.embeddings.search(segmented_query, limit=min(int(limit * retrieve_scale), MAX_SEARCH_LIMIT), weights=weights)
+            raw = _locked_emb_search(self.embeddings, segmented_query, limit=min(int(limit * retrieve_scale), MAX_SEARCH_LIMIT), weights=weights)
             output = []
             for item in raw:
                 parsed = self._parse_txtai_result(item)

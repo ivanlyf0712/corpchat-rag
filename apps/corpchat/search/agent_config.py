@@ -80,6 +80,7 @@ _DEFAULT_CONFIG: Dict = {
         "literality": 5,
         "empathy": 5,
         "style": "standard",
+        "hindsight_bank": "test-bank",
     },
     "search": {
         "depth": "deep",

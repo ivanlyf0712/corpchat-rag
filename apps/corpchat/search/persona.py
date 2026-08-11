@@ -10,7 +10,34 @@ are unchanged unless a profile is tuned.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Optional
+
+# Hindsight disposition 是 1–5 整数, CARA 是 0–1 浮点: v_0to1 = (v_1to5 - 1) / 4
+_DISPOSITION_KEYS = {
+    "skepticism": "disposition_skepticism",
+    "literality": "disposition_literalism",
+    "empathy": "disposition_empathy",
+}
+
+
+def _hindsight_disposition_to_profile(d: Dict) -> Dict:
+    """Hindsight bank config → CARA 0-1 dict。缺失项用中性 0.5。
+
+    兼容两种输入形状: 原始 bank config (disposition_skepticism/...) 与
+    hindsight_client.get_disposition 的已重命名输出 (skepticism/...)。
+    """
+    out: Dict = {}
+    for carakey, hs_key in _DISPOSITION_KEYS.items():
+        v = d.get(hs_key, d.get(carakey))
+        if v is None:
+            out[carakey] = 0.5
+        else:
+            try:
+                out[carakey] = max(0.0, min(1.0, (float(v) - 1.0) / 4.0))
+            except (TypeError, ValueError):
+                out[carakey] = 0.5
+    out["style"] = "balanced"
+    return out
 
 
 @dataclass
@@ -76,4 +103,39 @@ class DispositionProfile:
             literality=float(d.get("literality", 0.5)),
             empathy=float(d.get("empathy", 0.5)),
             style=str(d.get("style", "balanced")),
+        )
+
+    @classmethod
+    def from_hindsight(cls, bank_id: str,
+                       api_url: Optional[str] = None) -> "DispositionProfile":
+        """从 Hindsight bank 的 disposition 读取 CARA 人格。
+
+        Hindsight 的每个 bank 有 disposition 三维度 (1–5):
+          disposition_skepticism / disposition_literalism / disposition_empathy
+        你在 Hindsight Web UI (Control Plane) 调整这些值, CorpChat 读取后
+        映射为 CARA 0-1 人格。Hindsight 不可达时返回中性默认 (0.5)。
+
+        Args:
+            bank_id: Hindsight 记忆银行 ID (如 "corpchat")
+            api_url: 保留参数 (URL 统一由 hindsight_client 适配器解析)。
+        """
+        from . import hindsight_client as hc
+        d = hc.get_disposition(bank_id)
+        if not d:
+            # Hindsight 不可用 → 中性默认, 优雅降级
+            return cls()
+        return cls.from_dict(_hindsight_disposition_to_profile(d))
+
+    def sync_to_hindsight(self, bank_id: str,
+                          api_url: Optional[str] = None) -> bool:
+        """把当前 CARA 人格写回 Hindsight bank 的 disposition (1–5)。
+
+        让 CorpChat 里调好的人格同步到 Hindsight Web UI 可见。失败返回 False。
+        """
+        from . import hindsight_client as hc
+        return hc.set_disposition(
+            skepticism=round(float(getattr(self, "skepticism", 0.5)) * 4.0 + 1.0),
+            literality=round(float(getattr(self, "literality", 0.5)) * 4.0 + 1.0),
+            empathy=round(float(getattr(self, "empathy", 0.5)) * 4.0 + 1.0),
+            bank=bank_id,
         )

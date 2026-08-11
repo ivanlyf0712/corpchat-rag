@@ -74,27 +74,13 @@ INTENT_CLARIFY = "clarify"
 INTENT_FALLBACK = "fallback"
 
 # ── Rule-based keyword sets ──────────────────────────────────────────────
-# Each set is checked first (O(n) substring match, <1ms).
-# If no rule matches → LLM fallback. If LLM unavailable → default to "search".
-GREETING_KEYWORDS = [
-    "hi", "hello", "hey", "yo", "嗨", "你好", "好嗎", "哈囉", "早安", "午安",
-    "晚安", "久久", "怎麼樣", "最近怎麼樣", "nice to meet you",
-]
-
-SYSTEM_INFO_KEYWORDS = [
-    "你是誰", "你是誰", "what is your name", "who are you", "叫什麼名字",
-    "能做什麼", "what can you do", "can you help", "功能", "能力",
-    "作用", "什麼功能", "多少功能", "help", "幫助", "使用說明",
-    "搜索範圍", "scope", "what can you search", "can you search",
-    "你能搜尋", "搜什麼", "資料範圍", "what can you access",
-    "can you access", "access", "知道些什麼", "知道什么", "了解什麼", "了解什么",
-]
-
-CLARIFY_KEYWORDS = [
-    "能再說", "再說一遍", "不是很懂", "不太清楚", "clarify", "explain more",
-    "詳細一些", "細節", "what do you mean", "什麼意思", "不太明白",
-    "再解釋", "不太理解", "看不懂", "具體點",
-]
+# 单一来源: apps.corpchat.search.intent_words (候选 4 — 与 cross_table_agent
+# 共享同一套词表, 避免三份拷贝漂移)。保留旧列表名作向后兼容别名。
+from apps.corpchat.search.intent_words import (  # noqa: E402
+    CLARIFY_KEYWORDS,
+    GREETING_KEYWORDS,
+    SYSTEM_KEYWORDS as SYSTEM_INFO_KEYWORDS,
+)
 
 # LLM classification timeout (seconds) — per design spec §2.7
 LLM_INTENT_TIMEOUT = 2.0
@@ -322,7 +308,7 @@ class Agent:
     def _load_memory_from_db(self):
         """Load recent turns from DB if available; fall back to empty."""
         try:
-            from core.db import load_agent_memory
+            from core.corpchat_db import load_agent_memory
             turns = load_agent_memory(self.session_id, max_turns=self.max_history)
             if turns:
                 self.chat_history = turns[-self.max_history:]
@@ -334,7 +320,7 @@ class Agent:
     def _persist_turn(self, user_msg: str, bot_msg: str, intent: str):
         """Append the current turn to DB memory if possible."""
         try:
-            from core.db import save_agent_memory
+            from core.corpchat_db import save_agent_memory
             self._turn_counter += 1
             save_agent_memory(
                 session_id=self.session_id,
@@ -512,22 +498,10 @@ class Agent:
         # Respect classifier's LLM availability to keep greeting fast when LLM is down
         if not self.classifier._check_llm():
             return self._GREETING_RESPONSE
+        from apps.corpchat.search.intent_words import generate_greeting
         try:
-            result = _llm_client.chat(
-                [
-                    {"role": "system", "content": (
-                        "You are a friendly assistant. Reply to the user's greeting naturally. "
-                        "Keep it short, warm, and context-aware. "
-                        "Do NOT mention you are an AI or list capabilities."
-                    )},
-                    {"role": "user", "content": user_query or "Hi!"},
-                ],
-                temperature=0.7,
-                max_tokens=60,
-                timeout=5,
-            )
-            if result:
-                return result
+            return generate_greeting(_llm_client, user_query, "en",
+                                     fallback=self._GREETING_RESPONSE)
         except Exception as e:
             logger.debug(f"LLM greeting generation failed: {e}")
         return self._GREETING_RESPONSE
