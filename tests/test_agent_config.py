@@ -49,29 +49,29 @@ def test_default_config_is_deep_copied():
 
 
 def test_apply_audit_preset():
-    cfg = apply_preset(default_agent_config(), "审计助手")
+    cfg = apply_preset(default_agent_config(), "Audit Assistant")
     p = cfg["persona"]
     assert p["skepticism"] == 8 and p["literality"] == 7 and p["empathy"] == 3
     assert p["preset"] == "audit"
 
 
 def test_apply_service_preset():
-    cfg = apply_preset(default_agent_config(), "客服助手")
+    cfg = apply_preset(default_agent_config(), "Support Assistant")
     assert cfg["persona"]["empathy"] == 8
     assert cfg["persona"]["preset"] == "service"
 
 
 def test_apply_research_preset():
-    cfg = apply_preset(default_agent_config(), "研究助理")
+    cfg = apply_preset(default_agent_config(), "Research Assistant")
     assert cfg["persona"]["style"] == "detailed"
     assert cfg["persona"]["preset"] == "research"
 
 
 def test_custom_preset_keeps_values():
-    """'自訂' 不改动 persona 值, 只标记 preset=custom。"""
+    """'Custom' 不改动 persona 值, 只标记 preset=custom。"""
     cfg = default_agent_config()
     cfg["persona"]["skepticism"] = 9
-    apply_preset(cfg, "自訂")
+    apply_preset(cfg, "Custom")
     assert cfg["persona"]["skepticism"] == 9
     assert cfg["persona"]["preset"] == "custom"
 
@@ -103,12 +103,12 @@ def test_sources_label_key_roundtrip():
     )
 
     labels = sources_to_labels(["messages", "contacts"])
-    assert labels == ["消息", "联系人"]
+    assert labels == ["Messages", "Contacts"]
     # Streamlit 约束: 所有 default 值必须在 options 中
     assert all(l in SOURCE_OPTIONS for l in labels), f"default 超出 options: {labels}"
     assert sources_from_labels(labels) == ["messages", "contacts"]
-    assert sources_to_labels(["messages"]) == ["消息"]
-    assert sources_from_labels(["联系人"]) == ["contacts"]
+    assert sources_to_labels(["messages"]) == ["Messages"]
+    assert sources_from_labels(["Contacts"]) == ["contacts"]
 
 
 def test_agent_config_persistence(monkeypatch):

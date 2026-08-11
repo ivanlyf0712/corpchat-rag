@@ -26,23 +26,23 @@ CARA_PRESETS: Dict[str, Dict] = {
 }
 
 PRESET_LABELS = {
-    "审计助手": "audit",
-    "客服助手": "service",
-    "研究助理": "research",
-    "自訂": "custom",
+    "Audit Assistant": "audit",
+    "Support Assistant": "service",
+    "Research Assistant": "research",
+    "Custom": "custom",
 }
 
 # 回答长度 (UI 标签 → style key), 顺序即下拉选项顺序
 STYLE_LABELS = {
-    "简洁": "concise",
-    "标准": "standard",
-    "详细": "detailed",
+    "Concise": "concise",
+    "Standard": "standard",
+    "Detailed": "detailed",
 }
 
 # 数据源 (UI 标签 ↔ 内部 key); multiselect 的 options 与 default 都必须用标签
 SOURCE_LABELS = {
-    "消息": "messages",
-    "联系人": "contacts",
+    "Messages": "messages",
+    "Contacts": "contacts",
 }
 SOURCE_OPTIONS = list(SOURCE_LABELS.keys())
 

@@ -142,7 +142,7 @@ def _render_sidebar_settings_toggle():
     状态存于 session_state.settings_open (跨 rerun 保留)。
     """
     settings_open = st.session_state.get("settings_open", False)
-    label = "✖ 退出设置" if settings_open else "⚙️ 设置"
+    label = "✖ Exit settings" if settings_open else "⚙️ Settings"
     if st.button(label, key="settings_toggle", use_container_width=True):
         st.session_state.settings_open = not settings_open
         st.rerun()
@@ -711,18 +711,18 @@ def _render_memory_graph(cfg: dict):
     整个渲染 try/except 兜底 —— 图谱故障不应破坏搜索 UI。
     """
     try:
-        tab_data, tab_mem = st.tabs(["📊 数据地图", "🧠 记忆视图"])
+        tab_data, tab_mem = st.tabs(["📊 Data map", "🧠 Memory view"])
 
         # ── Tab 1: 数据地图 (txtai graph, 全量确定性) ──
         with tab_data:
             data_map = _extract_data_map()
             if not data_map or not data_map.get("nodes"):
-                st.caption("数据地图不可用 (索引未启用图功能 graph mode=off)。")
+                st.caption("Data map unavailable (index built with graph mode=off).")
             else:
                 st.iframe(_constellation_html(data_map["nodes"], data_map["edges"]), height=420)
                 st.caption(
-                    f"📊 数据地图 · 節點 {len(data_map['nodes'])} · 邊 {len(data_map['edges'])}"
-                    f" · 基于 txtai 图 (确定性消息/联系人关系)"
+                    f"📊 Data map · {len(data_map['nodes'])} nodes · {len(data_map['edges'])} edges"
+                    f" · from the txtai graph (deterministic message/contact relations)"
                 )
 
         # ── Tab 2: 记忆视图 (Hindsight 实体图 / 会话检索实体) ──
@@ -753,12 +753,12 @@ def _render_memory_graph(cfg: dict):
                     if nodes:
                         st.iframe(_constellation_html(nodes, edges), height=420)
                         st.caption(
-                            f"🧠 Hindsight 记忆视图 · 實體 {hg.get('total_entities', len(nodes))}"
-                            f" · 邊 {hg.get('total_edges', len(edges))}"
-                            f" · bank {hs_bank} (完整版在 :9999)"
+                            f"🧠 Hindsight memory view · {hg.get('total_entities', len(nodes))} entities"
+                            f" · {hg.get('total_edges', len(edges))} edges"
+                            f" · bank {hs_bank} (full version at :9999)"
                         )
                         return
-                st.caption("Hindsight 记忆为空 — 搜索/对话后会自动沉淀。")
+                st.caption("Hindsight memory is empty — it fills in as you search/chat.")
 
             # 回退: 会话检索实体的本地图
             from apps.corpchat.search.memory_graph import build_entity_graph
@@ -768,7 +768,7 @@ def _render_memory_graph(cfg: dict):
                 if isinstance(hits, list):
                     graph_messages.extend(h for h in hits if isinstance(h, dict))
             if not graph_messages:
-                st.caption("進行搜索後, 記憶圖譜將在此顯示實體關係。")
+                st.caption("Search first — the memory graph will show entity relationships here.")
                 return
             risk = set()
             if cfg["persona"].get("skepticism", 5) >= 7:
@@ -780,16 +780,16 @@ def _render_memory_graph(cfg: dict):
             )
             nodes, edges = graph["nodes"], graph["edges"]
             if not nodes:
-                st.caption("沒有可繪製的實體 (試著搜尋更多消息)。")
+                st.caption("No entities to draw yet (try searching more messages).")
                 return
             if len(nodes) > 40 or len(edges) > 80:
                 nodes, edges = _cap_graph(nodes, edges)
             st.iframe(_constellation_html(nodes, edges), height=420)
-            st.caption(f"節點 {len(nodes)} · 邊 {len(edges)} · 數據源 {cfg['knowledge'].get('sources')}")
+            st.caption(f"{len(nodes)} nodes · {len(edges)} edges · sources {cfg['knowledge'].get('sources')}")
             # 联动: 点击节点 → 回填搜索框
             clickable = [n for n in nodes if n["type"] in ("person", "company", "label", "keyword")][:12]
             if clickable:
-                st.caption("點擊節點 → 填入搜索框:")
+                st.caption("Click a node to fill the search box:")
                 cols = st.columns(min(3, len(clickable)))
                 for i, n in enumerate(clickable):
                     with cols[i % len(cols)]:
@@ -797,7 +797,7 @@ def _render_memory_graph(cfg: dict):
                             st.session_state.search_query = n["label"]
                             st.rerun()
     except Exception as e:
-        st.caption(f"記憶圖譜渲染失敗: {e}")
+        st.caption(f"Memory graph render failed: {e}")
 
 def _build_agent_process_payload(tool_calls: list, steps: list, turn: dict) -> dict:
     """Backward-compatible wrapper for the Process-window payload builder."""
@@ -835,16 +835,16 @@ def _render_settings_panel(cfg: dict):
     即时生效, 会话级持久化 (session_state.agent_config)。显隐由左栏
     ⚙️/✖ 开关控制 (settings_open)。
     """
-    with st.expander("🎛️ 配置代理", expanded=False):
-        with st.expander("🧠 人格特質 (CARA)", expanded=False):
+    with st.expander("🎛️ Configure Agent", expanded=False):
+        with st.expander("🧠 Personality (CARA)", expanded=False):
             # ── Hindsight 桥接 (只读镜像模式) ──
             # 填入 bank ID 后: 人格由 Hindsight 驱动, 滑杆只读显示 Hindsight 真实值。
             # 修改请到 Hindsight Web UI (链接下方), 或点"刷新"重新拉取。
             hs_bank = st.text_input(
-                "Hindsight 记忆银行 (可选)",
+                "Hindsight memory bank (optional)",
                 value=cfg["persona"].get("hindsight_bank", ""),
-                help="填入 Hindsight bank ID (如 test-bank), 人格由该 bank 的 disposition 驱动"
-                     " (只读镜像); 留空则用下方本地滑杆。",
+                help="Enter a Hindsight bank ID (e.g. test-bank) to drive the persona from that "
+                     "bank's disposition (read-only mirror); leave empty to use the local sliders below.",
                 disabled=st.session_state.searching,
             )
             cfg["persona"]["hindsight_bank"] = hs_bank.strip()
@@ -864,7 +864,7 @@ def _render_settings_panel(cfg: dict):
                         st.session_state.hs_bank = hs_bank.strip()
                         st.session_state.hs_profile_ts = True
                     except Exception as _hs_err:
-                        st.caption(f"⚠️ 无法连接 Hindsight: {type(_hs_err).__name__}: {_hs_err}")
+                        st.caption(f"⚠️ Cannot reach Hindsight: {type(_hs_err).__name__}: {_hs_err}")
                 else:
                     effective = st.session_state.get(cache_key)
 
@@ -872,16 +872,16 @@ def _render_settings_panel(cfg: dict):
             with col_link:
                 if hs_driven:
                     st.link_button(
-                        "🔗 在 Hindsight 中调整配置",
+                        "🔗 Adjust in Hindsight",
                         f"http://localhost:9999/banks/{hs_bank.strip()}/",
                         type="secondary",
                         use_container_width=True,
                     )
                 else:
-                    st.caption("未连接 Hindsight — 使用下方本地滑杆")
+                    st.caption("Not connected to Hindsight — using the local sliders below")
             with col_refresh:
                 if hs_driven and st.button(
-                    "🔄 刷新", use_container_width=True,
+                    "🔄 Refresh", use_container_width=True,
                     disabled=st.session_state.searching,
                 ):
                     # 清除 session 缓存标记 → 下一轮从 Hindsight 重新拉取 disposition
@@ -890,9 +890,9 @@ def _render_settings_panel(cfg: dict):
 
             if hs_driven and effective is not None:
                 st.caption(
-                    f"🔗 人格由 Hindsight 驱动: 懷疑 {effective.skepticism:.0%} · "
-                    f"字面 {effective.literality:.0%} · 共情 {effective.empathy:.0%}"
-                    f" (在 Hindsight Web UI 调整)"
+                    f"🔗 Personality driven by Hindsight: skepticism {effective.skepticism:.0%} · "
+                    f"literality {effective.literality:.0%} · empathy {effective.empathy:.0%}"
+                    f" (adjust in the Hindsight Web UI)"
                 )
 
             # 滑杆: Hindsight 驱动时只读显示 Hindsight 值; 否则本地可编辑
@@ -908,52 +908,52 @@ def _render_settings_panel(cfg: dict):
                 em_val = int(cfg["persona"].get("empathy", 5))
 
             preset_label = st.selectbox(
-                "預設模式", list(PRESET_LABELS.keys()),
+                "Preset mode", list(PRESET_LABELS.keys()),
                 index=preset_index(cfg["persona"].get("preset", "custom")),
                 disabled=st.session_state.searching or hs_ro,
             )
             apply_preset(cfg, preset_label)
 
             cfg["persona"]["skepticism"] = st.slider(
-                "懷疑度", 0, 10, sk_val,
-                help="對證據不足的結論標註不確定性",
+                "Skepticism", 0, 10, sk_val,
+                help="Mark uncertainty on conclusions with insufficient evidence",
                 disabled=st.session_state.searching or hs_ro,
             )
             cfg["persona"]["literality"] = st.slider(
-                "字面性", 0, 10, li_val,
-                help="嚴格依據檢索原文回答",
+                "Literality", 0, 10, li_val,
+                help="Answer strictly from the retrieved text",
                 disabled=st.session_state.searching or hs_ro,
             )
             cfg["persona"]["empathy"] = st.slider(
-                "共情度", 0, 10, em_val,
-                help="先回應情緒再給信息",
+                "Empathy", 0, 10, em_val,
+                help="Acknowledge tone/feelings before giving information",
                 disabled=st.session_state.searching or hs_ro,
             )
             style_label = st.selectbox(
-                "回答長度", list(STYLE_LABELS.keys()),
+                "Answer length", list(STYLE_LABELS.keys()),
                 index=style_index(cfg["persona"].get("style", "standard")),
                 disabled=st.session_state.searching or hs_ro)
             cfg["persona"]["style"] = STYLE_LABELS[style_label]
 
-        with st.expander("⚙️ 搜索策略", expanded=False):
+        with st.expander("⚙️ Search strategy", expanded=False):
             depth_label = st.selectbox(
-                "檢索深度", ["简单", "深度"],
+                "Search depth", ["Simple", "Deep"],
                 index=0 if cfg["search"].get("depth", "deep") == "simple" else 1,
-                help="简单=单步检索; 深度=跨表多步推理",
+                help="Simple = single-step search; Deep = cross-table multi-step reasoning",
                 disabled=st.session_state.searching)
-            cfg["search"]["depth"] = "simple" if depth_label == "简单" else "deep"
+            cfg["search"]["depth"] = "simple" if depth_label == "Simple" else "deep"
             cfg["search"]["expand"] = st.checkbox(
-                "查詢擴展", value=cfg["search"].get("expand", True),
-                help="LLM 语义重写 + 关键词", disabled=st.session_state.searching)
+                "Query expansion", value=cfg["search"].get("expand", True),
+                help="LLM semantic rephrase + keywords", disabled=st.session_state.searching)
             cfg["search"]["rerank"] = st.checkbox(
-                "重排序", value=cfg["search"].get("rerank", True),
-                help="交叉编码器重排", disabled=st.session_state.searching)
+                "Rerank", value=cfg["search"].get("rerank", True),
+                help="Cross-encoder reranking", disabled=st.session_state.searching)
             cfg["search"]["graph_hops"] = st.slider(
                 "Graph hops", 0, 3, int(cfg["search"].get("graph_hops", 1)),
                 disabled=st.session_state.searching)
             cfg["search"]["graph_parallel"] = st.checkbox(
                 "Graph path", value=cfg["search"].get("graph_parallel", False),
-                help="圖遍歷作為融合路 (關係查詢)", disabled=st.session_state.searching)
+                help="Traverse the graph as a fusion path (relationship queries)", disabled=st.session_state.searching)
             cfg["search"]["top_k"] = st.slider(
                 "Top-k", 1, 20, int(cfg["search"].get("top_k", 5)),
                 disabled=st.session_state.searching)
@@ -961,15 +961,15 @@ def _render_settings_panel(cfg: dict):
                 "Label filter", value=cfg["search"].get("label_filter", ""),
                 help="e.g. quotation_request", disabled=st.session_state.searching)
 
-        with st.expander("📚 知識範圍", expanded=False):
+        with st.expander("📚 Knowledge scope", expanded=False):
             source_labels = st.multiselect(
-                "數據源", SOURCE_OPTIONS,
+                "Data sources", SOURCE_OPTIONS,
                 default=sources_to_labels(cfg["knowledge"].get("sources", ["messages", "contacts"])),
                 disabled=st.session_state.searching)
             cfg["knowledge"]["sources"] = sources_from_labels(source_labels)
             cfg["knowledge"]["citations"] = st.checkbox(
-                "引用來源", value=cfg["knowledge"].get("citations", False),
-                help="答案附帶來源", disabled=st.session_state.searching)
+                "Citations", value=cfg["knowledge"].get("citations", False),
+                help="Attach sources to answers", disabled=st.session_state.searching)
 
 
 def _render_search_page():
@@ -1021,7 +1021,7 @@ def _render_search_page():
             # 滑杆/输入改动即时持久化 → 刷新后也能恢复
             _persist_agent_config(cfg)
         st.divider()
-        st.markdown("#### 🕸️ 記憶圖譜")
+        st.markdown("#### 🕸️ Memory Graph")
         _render_memory_graph(cfg)
     else:
         _render_chat_history(st.session_state.chat_history)
