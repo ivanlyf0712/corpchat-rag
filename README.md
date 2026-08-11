@@ -71,6 +71,31 @@ python apps/corpchat/search.py search "诈骗" --mode hybrid --expand --rerank
 python apps/corpchat/search.py synthetic-benchmark
 ```
 
+## Eval / 基线 (milestone 1: 量化当前管线)
+
+答案质量基线: 从语料生成对抗性 QA 对 (多跳/时序/跨会话/消歧/否定), 跑当前
+检索+合成管线, 用 DeepSeek-chat 做正确性+grounding 判定, 输出可量化数字。
+
+```bash
+# 在现有 140 条索引上快速跑 (冒烟)
+python eval/run_baseline.py --index apps/corpchat/search_index \
+    --contacts-index apps/corpchat/contacts_index --qa-count 200 --seed 42
+
+# 生成 10k 合成语料并重建索引后跑全量基线
+python apps/corpchat/gen_fake_msg.py --count 10000
+python apps/corpchat/search.py build --force
+python eval/run_baseline.py --index apps/corpchat/search_index \
+    --contacts-index apps/corpchat/contacts_index --qa-count 200 \
+    --spot-check 20 --out /tmp/baseline.json
+
+# 只看检索成本/延迟 (无 judge 时用 --judge mock 省一半 LLM 调用)
+python eval/run_baseline.py ... --judge mock
+```
+
+报告: answer correctness % · grounded % · hallucination % · 各题型分解 ·
+延迟 p50/p95/avg · token 用量与估算成本。`--spot-check N` 导出人工抽检表
+(judge 与回答器同型号, 需人工校准)。
+
 ## 项目结构
 
 ```

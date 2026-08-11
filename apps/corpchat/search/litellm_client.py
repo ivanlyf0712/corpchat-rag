@@ -20,6 +20,22 @@ from .config import (
     logger,
 )
 
+# 进程级 token 用量累计 (成本/用量观测, 供 eval 与监控使用)。
+# 每次成功的 chat 响应把 usage 累加进来; reset_usage() 可清零。
+_USAGE_TOTAL: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+
+
+def reset_usage() -> None:
+    """清零进程级 token 用量累计。"""
+    _USAGE_TOTAL["prompt_tokens"] = 0
+    _USAGE_TOTAL["completion_tokens"] = 0
+    _USAGE_TOTAL["calls"] = 0
+
+
+def usage_total() -> Dict[str, int]:
+    """返回进程级累计用量 (副本)。"""
+    return dict(_USAGE_TOTAL)
+
 
 class LiteLLMClient:
     """Thin wrapper around the LiteLLM OpenAI-compatible chat completions API.
@@ -34,6 +50,24 @@ class LiteLLMClient:
         self.api_base = (api_base or LITELLM_BASE_URL).rstrip("/")
         self.api_key = api_key or LITELLM_API_KEY
         self.model = model
+        # 单实例用量 (与进程级累计并存)
+        self.usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+
+    def _record_usage(self, usage: Optional[Dict]) -> None:
+        """把一次响应的 usage 计入实例与进程级累计。"""
+        if not usage:
+            return
+        try:
+            p = int(usage.get("prompt_tokens", 0) or 0)
+            c = int(usage.get("completion_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        self.usage["prompt_tokens"] += p
+        self.usage["completion_tokens"] += c
+        self.usage["calls"] += 1
+        _USAGE_TOTAL["prompt_tokens"] += p
+        _USAGE_TOTAL["completion_tokens"] += c
+        _USAGE_TOTAL["calls"] += 1
 
     def chat(self, messages: List[Dict], temperature: float = 0.1,
              max_tokens: int = 200, timeout: int = 15) -> str:
@@ -81,7 +115,9 @@ class LiteLLMClient:
                 timeout=timeout,
             )
             if resp.status_code == 200:
-                msg = resp.json()["choices"][0]["message"]
+                data = resp.json()
+                msg = data["choices"][0]["message"]
+                self._record_usage(data.get("usage"))
                 return {
                     "content": msg.get("content"),
                     "tool_calls": msg.get("tool_calls"),
@@ -140,8 +176,10 @@ class LiteLLMClient:
                 timeout=timeout,
             )
             if resp.status_code == 200:
-                msg = resp.json()["choices"][0]["message"]
+                data = resp.json()
+                msg = data["choices"][0]["message"]
                 logger.info("DeepSeek fallback LLM used successfully")
+                self._record_usage(data.get("usage"))
                 return {
                     "content": msg.get("content"),
                     "tool_calls": msg.get("tool_calls"),

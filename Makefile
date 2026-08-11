@@ -3,7 +3,7 @@
 # Operational helpers: validate .env, bootstrap external volumes, then run the
 # compose stack (postgres + hindsight + corpchat-rag).
 
-.PHONY: help check-env volumes up down logs ps test build
+.PHONY: help check-env volumes up down logs ps test build eval
 
 help:
 	@echo "CorpChat RAG targets:"
@@ -15,6 +15,7 @@ help:
 	@echo "  make ps          Show service status"
 	@echo "  make test        Run the full pytest suite"
 	@echo "  make build       docker compose build"
+	@echo "  make eval        Run the QA baseline on the current index (eval/run_baseline.py)"
 
 # ── .env validation ───────────────────────────────────────────────────
 # DEEPSEEK_API_KEY is required by docker-compose (fail-fast); DB_PASSWORD is
@@ -48,3 +49,10 @@ test:
 
 build:
 	docker compose build
+
+eval:
+	@test -f apps/corpchat/search_index/config.json || (echo "ERROR: index not built — run 'python apps/corpchat/search.py build --force' first" && exit 1)
+	@/Users/ivanlee/miniconda3/envs/ocr/bin/python eval/run_baseline.py \
+		--index apps/corpchat/search_index \
+		--contacts-index apps/corpchat/contacts_index \
+		--qa-count 200 --seed 42 --spot-check 20 --out /tmp/baseline.json
