@@ -122,6 +122,21 @@ def test_usage_capture():
     assert client.usage["calls"] == 2
 
 
+def test_write_spotcheck_no_crash(tmp_path):
+    """_write_spotcheck writes a table and never crashes (regression for the
+    stray-print NameError that killed the 200-q run before --out JSON)."""
+    from eval.run_baseline import _write_spotcheck
+
+    results = [{"id": "qa_1", "type": "negation", "question": "q?", "expected": "e",
+                "answer": "没有找到", "correct": True, "grounded": True,
+                "rationale": "ok"}]
+    out = tmp_path / "spot.md"
+    _write_spotcheck(results, str(out), 1)
+    text = out.read_text(encoding="utf-8")
+    assert "Human spot-check" in text
+    assert "qa_1" in text
+
+
 # ── Slot-based content variation (10k corpus is genuinely different) ─
 def test_slot_fill_varies_content_per_repeat():
     """同模板重复生成时内容不同 (数字/产品槽位随机化), 且同一 seed 确定性。"""

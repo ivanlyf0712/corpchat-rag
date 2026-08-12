@@ -185,13 +185,6 @@ def _write_spotcheck(results: List[Dict], path: str, n: int) -> None:
         f.write("\n".join(lines) + "\n")
     print(f"spot-check written to {path}")
 
-    print(f"tokens (in/out/calls): {usage['prompt_tokens']}/{usage['completion_tokens']}/{usage['calls']}")
-    print(f"est. cost            : ${cost:.4f}  (~${cost / max(agg['n'], 1) * 1000:.2f}/1k queries)")
-    print("-" * 60)
-    for t, d in sorted(agg["per_type"].items()):
-        print(f"  {t:24s} n={d['n']:3d}  correct={d['correct_rate']:.0%}  "
-              f"grounded={d['grounded_rate']:.0%}  halluc={d['hallucination_rate']:.0%}  p50={d['p50_ms']:.0f}ms")
-
 
 
 def main() -> None:
@@ -260,13 +253,13 @@ def main() -> None:
     agg = _aggregate(results)
     usage = usage_total()
     _print_report(agg, usage)
-    if args.spot_check:
-        _write_spotcheck(results, args.spot_file, args.spot_check)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump({"aggregate": agg, "usage": usage, "results": results},
                       f, ensure_ascii=False, indent=2)
         print(f"results written to {args.out}")
+    if args.spot_check:
+        _write_spotcheck(results, args.spot_file, args.spot_check)
 
 
 if __name__ == "__main__":
