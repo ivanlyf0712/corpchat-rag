@@ -82,6 +82,8 @@ python eval/run_baseline.py --index apps/corpchat/search_index \
     --contacts-index apps/corpchat/contacts_index --qa-count 200 --seed 42
 
 # 生成 10k 合成语料并重建索引后跑全量基线
+# (gen_fake_msg 对模板做槽位填充: 数字/金额/百分比/产品词每次 repeat 随机化,
+#  因此 10k 行内容真正不同, 而非 140 条重复 65 遍)
 python apps/corpchat/gen_fake_msg.py --count 10000
 python apps/corpchat/search.py build --force
 python eval/run_baseline.py --index apps/corpchat/search_index \

@@ -120,3 +120,21 @@ def test_usage_capture():
     client._record_usage(None)
     client._record_usage({"prompt_tokens": "x", "completion_tokens": None})
     assert client.usage["calls"] == 2
+
+
+# ── Slot-based content variation (10k corpus is genuinely different) ─
+def test_slot_fill_varies_content_per_repeat():
+    """同模板重复生成时内容不同 (数字/产品槽位随机化), 且同一 seed 确定性。"""
+    import random
+    from apps.corpchat.gen_fake_msg import _randomize_text
+
+    template = "方案报价 8-12% 年化, 最低 300 片, 5000元, 物流方案 細節"
+    rng = random.Random(7)
+    variants = {_randomize_text(template, rng) for _ in range(20)}
+    assert len(variants) > 10, f"槽位填充应产生不同内容: {len(variants)} 变体"
+
+    # 确定性: 同 seed → 同输出序列
+    a = [_randomize_text(template, random.Random(3)) for _ in range(3)]
+    b = [_randomize_text(template, random.Random(3)) for _ in range(3)]
+    assert a == b
+    assert a[0] != template, "有数字/产品词的模板应被改写"

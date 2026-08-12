@@ -19,6 +19,7 @@ import sys
 import os
 import json
 import random
+import re
 from datetime import datetime, timedelta
 
 # ── Allow imports from project root ──
@@ -489,6 +490,39 @@ def _make_open_kfid(label: str, idx: int) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  SLOT-BASED CONTENT VARIATION (--count 10k 不再是 140 条重复 65 遍)
+# ═══════════════════════════════════════════════════════════════════════
+# 每个 repeat 重新抽取: 数字 (百分比/金额/数量) 与产品词, 使 10k 行内容真正不同。
+_RANDOM_PRODUCTS = [
+    "物流方案", "ERP 系統", "M365 E5", "Surface Pro", "數據中心方案",
+    "SaaS 平台", "供應鏈系統", "雲端備份", "資安防護", "數據分析平台",
+]
+
+
+def _randomize_text(text: str, rng) -> str:
+    """对模板文本做槽位填充: 随机化数字 (百分比/金额/数量) 与产品词。
+
+    保持模板结构/语气/label 不变, 仅让每次 repeat 的表面内容不同。
+    纯文本模板 (无数字无产品词) 保持不变 — 这类只占少数。
+    """
+    out = text
+    # 百分比: "8-12%" / "3%" → 随机
+    out = re.sub(r"(\d{1,2})-(\d{1,2})%", lambda m: f"{rng.randint(2, 15)}-{rng.randint(16, 30)}%", out)
+    out = re.sub(r"(?<!\d)\d{1,2}%", lambda m: f"{rng.randint(1, 20)}%", out)
+    # 金额: "¥50,000" / "5000元" → 随机
+    out = re.sub(r"¥?\d[\d,]*(?=元|$)", lambda m: f"{rng.randint(3, 90) * 1000:,}".replace(",", ","), out)
+    out = re.sub(r"(?<!\d)\d{3,}(?=元)", lambda m: f"{rng.randint(5, 500) * 1000}", out)
+    # 数量: "300片" / "5台" / "7天" → 随机
+    out = re.sub(r"(?<!\d)\d+(?=[片台套個个件天萬万])",
+                 lambda m: str(rng.randint(1, 3000)), out)
+    # 产品词替换 (每个出现项约 50% 概率换掉, 单次替换保证多样性)
+    for prod in _RANDOM_PRODUCTS:
+        if prod in out and rng.random() < 0.5:
+            out = out.replace(prod, rng.choice(_RANDOM_PRODUCTS), 1)
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  DATABASE OPERATIONS
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -541,6 +575,8 @@ def conversation_to_rows(conversation: dict, open_kfid: str, userid_map: dict) -
         # Advance by 1-5 minutes from the PREVIOUS message (monotonic)
         current_time += timedelta(minutes=random.randint(1, 5))
         speaker_name = CONTACTS[speaker_idx]["name"]
+        # 槽位填充: 每次 repeat 的内容不同 (数字/产品词随机化)
+        content = _randomize_text(text, random)
 
         if speaker_name == init_name:
             origin = 3   # customer
@@ -559,7 +595,7 @@ def conversation_to_rows(conversation: dict, open_kfid: str, userid_map: dict) -
             "origin": origin,
             "servicer_userid": servicer_userid,
             "msgtype": "text",
-            "content": text,
+            "content": content,
             "label": conversation["label"],
             "raw_json": {
                 "msgid": f"msg_{open_kfid}_{i:04d}",
@@ -569,7 +605,7 @@ def conversation_to_rows(conversation: dict, open_kfid: str, userid_map: dict) -
                 "origin": origin,
                 "servicer_userid": servicer_userid,
                 "msgtype": "text",
-                "text": {"content": text},
+                "text": {"content": content},
             },
         })
     return rows
