@@ -619,7 +619,10 @@ def main():
     # Parse CLI args
     seed = 42
     min_count = 150
-    for i, arg in enumerate(sys.argv[1:], 1):
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        arg = args[i]
         if arg == "--clear-msgs":
             conn = psycopg2.connect(**DB_CONFIG)
             cur = conn.cursor()
@@ -638,10 +641,15 @@ def main():
             cur.close()
             conn.close()
             print("Cleared all existing contacts and messages.")
-        if arg.startswith("--seed="):
+        if arg == "--seed" and i + 1 < len(args):
+            seed = int(args[i + 1]); i += 1
+        elif arg.startswith("--seed="):
             seed = int(arg.split("=")[1])
-        if arg.startswith("--count="):
+        if arg == "--count" and i + 1 < len(args):
+            min_count = int(args[i + 1]); i += 1
+        elif arg.startswith("--count="):
             min_count = int(arg.split("=")[1])
+        i += 1
 
     random.seed(seed)
     Faker.seed(seed)
