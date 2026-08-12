@@ -467,6 +467,37 @@ def test_cross_table_agent_fallback_keeps_structured_tool_available(monkeypatch)
     assert res.strip(), "结构化工具降级路径仍应可用"
 
 
+def test_get_structured_result_exposes_hits(monkeypatch):
+    """ticket 04: 工具暴露结构化结果 {hits, expanded_queries, filter_used}。
+
+    答案路径直接从结构化通道消费 hits, 不再 regex 解析格式化字符串。
+    """
+    from apps.corpchat.search.tools import get_structured_result
+
+    msg_hit = {"id": "m1", "text": "合同已签", "score": 0.5,
+               "metadata": {"customer_name": "陳志明", "label": "sample_request"}}
+    monkeypatch.setattr(tools_module, "_last_msg_meta", {
+        "query": "合同", "expanded_queries": ["合约"], "hit_count": 1,
+        "previews": [], "raw_hits": [msg_hit],
+        "filter_used": {"sender": "陳志明", "receiver": None},
+    })
+    sr = get_structured_result("search_messages")
+    assert sr["hits"] == [msg_hit]
+    assert sr["expanded_queries"] == ["合约"]
+    assert sr["filter_used"]["sender"] == "陳志明"
+
+    contact_hit = {"id": "c1", "text": "陳志明", "score": 0.9,
+                   "metadata": {"full_name": "陳志明", "company": "鴻海", "email": "a@b.c"}}
+    monkeypatch.setattr(tools_module, "_last_contact_meta", {
+        "query": "陳志明", "hit_count": 1, "previews": [], "raw_hits": [contact_hit],
+    })
+    sr = get_structured_result("search_contacts")
+    assert sr["hits"] == [contact_hit]
+    assert sr["filter_used"] == {"query": "陳志明"}
+
+    assert get_structured_result("search_conversation_partners") is None
+
+
 # ── Ticket 02: Hindsight retain 实体锚点 (extract_entity_tags) ─────
 class TestExtractEntityTags:
     """从 raw_hits metadata 提取实体名, 供 Hindsight retain tags 使用。"""

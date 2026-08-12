@@ -479,6 +479,44 @@ class TestPerCallMetaAttribution:
 
 
 
+# ── Ticket 04: structured fallback rendering (regex-scraping removed) ─
+class TestStructuredFallback:
+    def _agent(self):
+        return CrossTableAgent()
+
+    def test_structured_fallback_renders_from_hits(self):
+        """结构化 hits 渲染: 邮箱/公司/预览直接来自 metadata, 无 regex。"""
+        agent = self._agent()
+        msg_hits = [{"id": "m1",
+                     "text": "陳志明 (sample_request)\n---\n合同已签，请确认后安排付款。",
+                     "metadata": {"customer_name": "陳志明", "label": "sample_request"}}]
+        contact_hits = [{"id": "c1", "text": "陳志明",
+                         "metadata": {"full_name": "陳志明", "userid": "user_陳志明_johnsonj",
+                                      "email": "weiyao@example.org", "company": "聯成電腦",
+                                      "phone": "0912345678"}}]
+        answer = agent._structured_fallback_answer(
+            "发'合同已签'消息的人，他的邮箱是什么？", "", "", msg_hits, contact_hits)
+        assert "合同已签" in answer
+        assert "weiyao@example.org" in answer
+        assert "陳志明" in answer
+        assert "聯成電腦" in answer
+
+    def test_structured_fallback_empty_hits_delegates_legacy(self):
+        """无结构化 hits → 回退 legacy 格式化字符串解析 (向后兼容)。"""
+        agent = self._agent()
+        answer = agent._structured_fallback_answer("不存在的关键词", "", "", [], [])
+        assert "抱歉" in answer or "Sorry" in answer
+
+    def test_extract_userid_from_hits_structured(self):
+        """从结构化 hits 直接读 userid (不依赖格式化字符串里的 '(userid: ...)')。"""
+        hits = [{"id": "m1", "text": "x",
+                 "metadata": {"external_userid": "user_陳志明_johnsonj",
+                              "servicer_userid": "user_許志豪_yongtang"}}]
+        assert CrossTableAgent._extract_userid_from_hits(hits) == "user_陳志明_johnsonj"
+        assert CrossTableAgent._extract_userid_from_hits([]) is None
+        assert CrossTableAgent._extract_userid_from_hits([{"id": "m", "metadata": {}}]) is None
+
+
 # ── Single source for intent words (candidate 4: 三份拷贝收敛为一处) ─
 def test_intent_words_single_source():
     """greeting/system/clarify 词表与生成器只有一份实现, 双 agent 共享。"""

@@ -1,0 +1,386 @@
+[
+  {
+    "type": "contract_clause",
+    "question": "关于 雅芳 的消息里具体说了什么？",
+    "expected": "雅芳 姐 午安 ， 華碩 這邊 上 週下 的 那批 教育 訓練 教材 採購 單 ， 想 確認 一下 交期 大概 什麼 時候 可以 出貨 ？",
+    "evidence": [
+      "msg_kf_order_confirmation_373_0000__chunk0"
+    ],
+    "context": null,
+    "id": "contract_001",
+    "label": "order_confirmation"
+  },
+  {
+    "type": "contract_party",
+    "question": "关于 雅芳 的消息是谁发送的？",
+    "expected": "江柏翰",
+    "evidence": [
+      "msg_kf_order_confirmation_342_0000__chunk0"
+    ],
+    "context": null,
+    "id": "contract_002",
+    "label": "order_confirmation"
+  },
+  {
+    "type": "contract_date",
+    "question": "关于 欣妤 的消息的发送日期是哪天？",
+    "expected": "2026-07-23",
+    "evidence": [
+      "msg_kf_quotation_request_1685_0001__chunk0"
+    ],
+    "context": null,
+    "id": "contract_003",
+    "label": "quotation_request"
+  },
+  {
+    "type": "contract_amount",
+    "question": "关于 吳總監 的消息里提到的金额是多少？",
+    "expected": "¥128,000",
+    "evidence": [
+      "msg_kf_payment_reminder_568_0000__chunk0"
+    ],
+    "context": null,
+    "id": "contract_004",
+    "label": "payment_reminder"
+  },
+  {
+    "type": "contract_negation",
+    "question": "合約中是否有提到 独家授权？",
+    "expected": "没有找到相关证据",
+    "evidence": [],
+    "context": null,
+    "id": "contract_005",
+    "label": ""
+  },
+  {
+    "type": "contract_date",
+    "question": "关于 麻煩 的消息的发送日期是哪天？",
+    "expected": "2026-07-17",
+    "evidence": [
+      "msg_kf_equipment_quote_1856_0004__chunk0"
+    ],
+    "context": null,
+    "id": "contract_006",
+    "label": "equipment_quote"
+  },
+  {
+    "type": "contract_party",
+    "question": "关于 你好 的消息是谁发送的？",
+    "expected": "廖珮琪",
+    "evidence": [
+      "msg_kf_invoice_issue_1275_0001__chunk0"
+    ],
+    "context": null,
+    "id": "contract_007",
+    "label": "invoice_issue"
+  },
+  {
+    "type": "contract_amount",
+    "question": "关于 明宏哥 的消息里提到的金额是多少？",
+    "expected": "¥480,000",
+    "evidence": [
+      "msg_kf_software_license_1308_0001__chunk0"
+    ],
+    "context": null,
+    "id": "contract_008",
+    "label": "software_license"
+  },
+  {
+    "type": "contract_amount",
+    "question": "关于 吳總監 的消息里提到的金额是多少？",
+    "expected": "¥128,000",
+    "evidence": [
+      "msg_kf_payment_reminder_227_0000__chunk0"
+    ],
+    "context": null,
+    "id": "contract_009",
+    "label": "payment_reminder"
+  },
+  {
+    "type": "contract_company",
+    "question": "发过关于 這邊 的消息的 周怡萱，他的公司是哪一家？",
+    "expected": "周怡萱 的公司是 微軟台灣, 邮箱 hwang@example.org",
+    "evidence": [
+      "msg_kf_warranty_claim_85_0004__chunk0"
+    ],
+    "context": null,
+    "id": "contract_010",
+    "label": "warranty_claim"
+  },
+  {
+    "type": "contract_date",
+    "question": "关于 主要 的消息的发送日期是哪天？",
+    "expected": "2026-07-22",
+    "evidence": [
+      "msg_kf_equipment_quote_306_0002__chunk0"
+    ],
+    "context": null,
+    "id": "contract_011",
+    "label": "equipment_quote"
+  },
+  {
+    "type": "contract_negation",
+    "question": "合約中是否有提到 违约金？",
+    "expected": "没有找到相关证据",
+    "evidence": [],
+    "context": null,
+    "id": "contract_012",
+    "label": ""
+  },
+  {
+    "type": "contract_date",
+    "question": "关于 整理 的消息的发送日期是哪天？",
+    "expected": "2026-08-04",
+    "evidence": [
+      "msg_kf_equipment_quote_1174_0003__chunk0"
+    ],
+    "context": null,
+    "id": "contract_013",
+    "label": "equipment_quote"
+  },
+  {
+    "type": "contract_date",
+    "question": "关于 明宏哥 的消息的发送日期是哪天？",
+    "expected": "2026-08-06",
+    "evidence": [
+      "msg_kf_software_license_1680_0001__chunk0"
+    ],
+    "context": null,
+    "id": "contract_014",
+    "label": "software_license"
+  },
+  {
+    "type": "contract_negation",
+    "question": "合約中是否有提到 仲裁条款？",
+    "expected": "没有找到相关证据",
+    "evidence": [],
+    "context": null,
+    "id": "contract_015",
+    "label": ""
+  },
+  {
+    "type": "contract_negation",
+    "question": "合約中是否有提到 竞业禁止？",
+    "expected": "没有找到相关证据",
+    "evidence": [],
+    "context": null,
+    "id": "contract_016",
+    "label": ""
+  },
+  {
+    "type": "contract_negation",
+    "question": "合約中是否有提到 竞业禁止？",
+    "expected": "没有找到相关证据",
+    "evidence": [],
+    "context": null,
+    "id": "contract_017",
+    "label": ""
+  },
+  {
+    "type": "contract_company",
+    "question": "发过关于 林財務長 的消息的 廖珮琪，他的公司是哪一家？",
+    "expected": "廖珮琪 的公司是 勤業眾信, 邮箱 williamanderson@example.com",
+    "evidence": [
+      "msg_kf_invoice_issue_314_0000__chunk0"
+    ],
+    "context": null,
+    "id": "contract_018",
+    "label": "invoice_issue"
+  },
+  {
+    "type": "contract_clause",
+    "question": "关于 其他 的消息里具体说了什么？",
+    "expected": "對 ， 其他 條款 不變 ， 只有 租金 調整 。   那 我 請 法務擬 一份 續約 合約給 你 。",
+    "evidence": [
+      "msg_kf_contract_renewal_937_0003__chunk0"
+    ],
+    "context": null,
+    "id": "contract_019",
+    "label": "contract_renewal"
+  },
+  {
+    "type": "contract_party",
+    "question": "关于 謝謝淑芬姐 的消息是谁发送的？",
+    "expected": "蔡欣妤",
+    "evidence": [
+      "msg_kf_quotation_request_228_0002__chunk0"
+    ],
+    "context": null,
+    "id": "contract_020",
+    "label": "quotation_request"
+  },
+  {
+    "type": "contract_negation",
+    "question": "合約中是否有提到 独家授权？",
+    "expected": "没有找到相关证据",
+    "evidence": [],
+    "context": null,
+    "id": "contract_021",
+    "label": ""
+  },
+  {
+    "type": "contract_party",
+    "question": "关于 胡副 的消息是谁发送的？",
+    "expected": "周怡萱",
+    "evidence": [
+      "msg_kf_warranty_claim_1480_0000__chunk0"
+    ],
+    "context": null,
+    "id": "contract_022",
+    "label": "warranty_claim"
+  },
+  {
+    "type": "contract_clause",
+    "question": "关于 方副理 的消息里具体说了什么？",
+    "expected": "方副理 您好 ！   我 幫 您 查 一下 ， 請 問有 具體 的 型號 或 規格 需求 嗎 ？",
+    "evidence": [
+      "msg_kf_equipment_quote_120_0001__chunk0"
+    ],
+    "context": null,
+    "id": "contract_023",
+    "label": "equipment_quote"
+  },
+  {
+    "type": "contract_amount",
+    "question": "关于 可以 的消息里提到的金额是多少？",
+    "expected": "15%",
+    "evidence": [
+      "msg_kf_contract_renewal_534_0002__chunk0"
+    ],
+    "context": null,
+    "id": "contract_024",
+    "label": "contract_renewal"
+  },
+  {
+    "type": "contract_date",
+    "question": "关于 沒關 的消息的发送日期是哪天？",
+    "expected": "2026-08-02",
+    "evidence": [
+      "msg_kf_payment_reminder_1591_0002__chunk0"
+    ],
+    "context": null,
+    "id": "contract_025",
+    "label": "payment_reminder"
+  },
+  {
+    "type": "contract_clause",
+    "question": "关于 佩珊 的消息里具体说了什么？",
+    "expected": "佩珊 你好 ！   新 的 租金 我們 這邊 建議 調漲   9% ， 主要 是 因為 地段 行情 跟 管理 費都 有 調整 。   不過 老客 戶 我 可以 幫 你 爭取 到 只 漲   10% 。",
+    "evidence": [
+      "msg_kf_contract_renewal_1309_0001__chunk0"
+    ],
+    "context": null,
+    "id": "contract_026",
+    "label": "contract_renewal"
+  },
+  {
+    "type": "contract_party",
+    "question": "关于 明宏哥 的消息是谁发送的？",
+    "expected": "謝明宏",
+    "evidence": [
+      "msg_kf_software_license_657_0001__chunk0"
+    ],
+    "context": null,
+    "id": "contract_027",
+    "label": "software_license"
+  },
+  {
+    "type": "contract_company",
+    "question": "发过关于 其他 的消息的 鍾佩珊，他的公司是哪一家？",
+    "expected": "鍾佩珊 的公司是 和碩聯合科技, 邮箱 mjiang@example.com",
+    "evidence": [
+      "msg_kf_contract_renewal_348_0003__chunk0"
+    ],
+    "context": null,
+    "id": "contract_028",
+    "label": "contract_renewal"
+  },
+  {
+    "type": "contract_amount",
+    "question": "关于 吳總監 的消息里提到的金额是多少？",
+    "expected": "¥128,000",
+    "evidence": [
+      "msg_kf_payment_reminder_1157_0000__chunk0"
+    ],
+    "context": null,
+    "id": "contract_029",
+    "label": "payment_reminder"
+  },
+  {
+    "type": "contract_company",
+    "question": "发过关于 小姐 的消息的 方志遠，他的公司是哪一家？",
+    "expected": "方志遠 的公司是 友達光電, 邮箱 hsiu-chih05@example.org",
+    "evidence": [
+      "msg_kf_equipment_quote_1484_0000__chunk0"
+    ],
+    "context": null,
+    "id": "contract_030",
+    "label": "equipment_quote"
+  },
+  {
+    "type": "contract_company",
+    "question": "发过关于 原來 的消息的 廖珮琪，他的公司是哪一家？",
+    "expected": "廖珮琪 的公司是 勤業眾信, 邮箱 williamanderson@example.com",
+    "evidence": [
+      "msg_kf_invoice_issue_221_0004__chunk0"
+    ],
+    "context": null,
+    "id": "contract_031",
+    "label": "invoice_issue"
+  },
+  {
+    "type": "contract_party",
+    "question": "关于 出貨前 的消息是谁发送的？",
+    "expected": "江柏翰",
+    "evidence": [
+      "msg_kf_order_confirmation_745_0003__chunk0"
+    ],
+    "context": null,
+    "id": "contract_032",
+    "label": "order_confirmation"
+  },
+  {
+    "type": "contract_company",
+    "question": "发过关于 王經理 的消息的 鍾佩珊，他的公司是哪一家？",
+    "expected": "鍾佩珊 的公司是 和碩聯合科技, 邮箱 mjiang@example.com",
+    "evidence": [
+      "msg_kf_contract_renewal_1154_0000__chunk0"
+    ],
+    "context": null,
+    "id": "contract_033",
+    "label": "contract_renewal"
+  },
+  {
+    "type": "contract_clause",
+    "question": "关于 沒關 的消息里具体说了什么？",
+    "expected": "沒關 係 ， 再麻煩 您 了 。   如果 真的 有什麼 問題 也 可以 跟 我 說 。",
+    "evidence": [
+      "msg_kf_payment_reminder_971_0002__chunk0"
+    ],
+    "context": null,
+    "id": "contract_034",
+    "label": "payment_reminder"
+  },
+  {
+    "type": "contract_amount",
+    "question": "关于 明宏哥 的消息里提到的金额是多少？",
+    "expected": "¥480,000",
+    "evidence": [
+      "msg_kf_software_license_37_0001__chunk0"
+    ],
+    "context": null,
+    "id": "contract_035",
+    "label": "software_license"
+  },
+  {
+    "type": "contract_clause",
+    "question": "关于 那個 的消息里具体说了什么？",
+    "expected": "哦 那個 是 因為 有 追加 一週 的 駐點 服務 ， 可能 合約 附件 沒有 更新 到 。   我 請業務補 一份 合約 增補 協議給 你 。",
+    "evidence": [
+      "msg_kf_invoice_issue_1926_0003__chunk0"
+    ],
+    "context": null,
+    "id": "contract_036",
+    "label": "invoice_issue"
+  }
+]

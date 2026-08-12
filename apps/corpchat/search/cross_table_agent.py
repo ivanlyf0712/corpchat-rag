@@ -790,7 +790,16 @@ class CrossTableAgent:
             })
 
             # Second: extract userid from message results and search contacts
-            userid = self._extract_userid_from_result(msg_result)
+            # (结构化优先: 从工具 meta 的 raw_hits 读 userid; 无结构化时才回退 regex)
+            msg_struct = {}
+            try:
+                from .tools import get_structured_result
+                msg_struct = get_structured_result("search_messages") or {}
+            except Exception:
+                pass
+            userid = self._extract_userid_from_hits(msg_struct.get("hits") or [])
+            if not userid:
+                userid = self._extract_userid_from_result(msg_result)
             if userid:
                 # Search contacts by the exact userid
                 _t0 = _time.perf_counter()
@@ -830,11 +839,23 @@ class CrossTableAgent:
             except Exception:
                 pass
 
+        # ── 收集结构化 hits (ticket 04: fallback 答案路径消费结构化结果) ──
+        msg_hits = (msg_struct.get("hits") or []) if "msg_struct" in dir() else []
+        contact_struct = {}
+        try:
+            from .tools import get_structured_result
+            contact_struct = get_structured_result("search_contacts") or {}
+        except Exception:
+            pass
+        contact_hits = contact_struct.get("hits") or []
+
         # ── Step 3: Try LLM summarization ──
         try:
-            summary = self._llm_summarize(user_input, msg_result, contact_result)
+            summary = self._llm_summarize(user_input, msg_result, contact_result,
+                                          msg_hits=msg_hits, contact_hits=contact_hits)
         except Exception:
-            summary = self._format_fallback_answer(user_input, msg_result, contact_result)
+            summary = self._structured_fallback_answer(user_input, msg_result, contact_result,
+                                                       msg_hits, contact_hits)
 
         self._add_step("✨", "Answer generation", 0, "Combined results into answer")
 
@@ -914,6 +935,24 @@ class CrossTableAgent:
         return any(marker in result for marker in empty_markers)
 
     @staticmethod
+    def _extract_userid_from_hits(raw_hits: List[Dict]) -> Optional[str]:
+        """从结构化 message hits 中提取 userid (确定性, 无 regex 解析格式化字符串)。
+
+        每条 hit 的 metadata 携带 external_userid (客户) / servicer_userid (客服),
+        直接读取即可, 不再从格式化显示文本里抓 '(userid: ...)'。
+        """
+        for h in raw_hits or []:
+            if not isinstance(h, dict):
+                continue
+            meta = h.get("metadata") or {}
+            if not isinstance(meta, dict):
+                continue
+            uid = meta.get("external_userid") or meta.get("servicer_userid")
+            if uid:
+                return str(uid)
+        return None
+
+    @staticmethod
     def _extract_userid_from_result(result: str) -> Optional[str]:
 
         """Extract userid from tool result text. E.g. '(userid: user_陳志明_johnsonj)'."""
@@ -939,8 +978,14 @@ class CrossTableAgent:
             return match.group(1)
         return None
 
-    def _llm_summarize(self, query: str, msg_result: str, contact_result: str) -> str:
-        """Use LiteLLM to summarize combined results."""
+    def _llm_summarize(self, query: str, msg_result: str, contact_result: str,
+                       msg_hits: Optional[List[Dict]] = None,
+                       contact_hits: Optional[List[Dict]] = None) -> str:
+        """Use LiteLLM to summarize combined results.
+
+        msg_hits/contact_hits: 结构化工具 hits (ticket 04)。LLM 不可用或判断
+        无信息时, fallback 渲染优先消费结构化 hits (无 regex 解析格式化字符串)。
+        """
         from .litellm_client import LiteLLMClient
 
         lang = self._detect_language(query)
@@ -980,7 +1025,8 @@ class CrossTableAgent:
             timeout=15,
         )
         if not result:
-            return self._format_fallback_answer(query, msg_result, contact_result)
+            return self._structured_fallback_answer(query, msg_result, contact_result,
+                                                    msg_hits or [], contact_hits or [])
 
         # If the LLM says it found nothing but we have search results, show the raw results
         no_info_markers = ["没有找到", "未找到", "没有相关", "no information", "no relevant",
@@ -991,18 +1037,27 @@ class CrossTableAgent:
         has_results = bool(msg_result.strip() or contact_result.strip())
         if has_results and any(marker in result for marker in no_info_markers):
             logger.info("LLM reported no info but search returned results — showing raw results")
-            return self._format_fallback_answer(query, msg_result, contact_result)
+            return self._structured_fallback_answer(query, msg_result, contact_result,
+                                                    msg_hits or [], contact_hits or [])
 
         return result
 
 
-    def _format_fallback_answer(self, query: str, msg_result: str, contact_result: str) -> str:
-        """Smart fallback: extract email from contacts result for a direct answer.
+    def _structured_fallback_answer(self, query: str, msg_result: str, contact_result: str,
+                                    msg_hits: List[Dict], contact_hits: List[Dict]) -> str:
+        """Fallback 渲染: 有结构化 hits 时直接渲染结构化结果 (ticket 04, 无 regex),
+        否则回退到 legacy 格式化字符串解析 (保持测试向后兼容)。"""
+        if msg_hits or contact_hits:
+            return self._format_structured_answer(query, msg_hits or [], contact_hits or [],
+                                                  self._detect_language(query))
+        return self._format_fallback_answer(query, msg_result, contact_result)
 
-        For cross-table queries (message → contact), the answer is structured as:
-          1. WHO sent the message (name + userid)
-          2. WHAT they sent (message preview)
-          3. THEN the email / contact details
+
+
+    def _format_fallback_answer(self, query: str, msg_result: str, contact_result: str) -> str:
+        """Legacy formatted-string parsing (kept for backward-compat unit tests;
+        the production fallback path calls `_format_structured_answer` with the
+        tools' structured hits — ticket 04 removes regex-scraping from that path).
         """
         lang = self._detect_language(query)
 
@@ -1103,6 +1158,73 @@ class CrossTableAgent:
                 return f"Sorry, no information found related to '{query}'."
             return f"抱歉，没有找到与「{query}」相关的信息。"
         return "\n\n".join(parts)
+
+    def _format_structured_answer(self, query: str, msg_hits: List[Dict],
+                                  contact_hits: List[Dict], lang: str) -> str:
+        """从结构化工具 hits 渲染 fallback 答案 (纯渲染, 无 regex 解析)。
+
+        contact_hits[0] / msg_hits[0] 的 metadata 直接携带联系人字段与
+        发送者 userid — 答案路径不再从格式化字符串里抓 Email:/Company:。
+        """
+        contact: Dict = {}
+        if contact_hits and isinstance(contact_hits[0], dict):
+            c = contact_hits[0]
+            contact = c.get("metadata") if isinstance(c.get("metadata"), dict) else c
+        email = contact.get("email")
+        name = contact.get("full_name") or contact.get("name")
+        userid = contact.get("userid")
+        company = contact.get("company")
+        phone = contact.get("phone")
+
+        msg_preview = None
+        if msg_hits and isinstance(msg_hits[0], dict):
+            text = str(msg_hits[0].get("text") or "")
+            if "\n---\n" in text:
+                msg_preview = text.split("\n---\n", 1)[1].strip()[:120]
+            else:
+                msg_preview = text.strip()[:120]
+
+        # ── Build structured answer ──
+        if email:
+            if lang == "en":
+                result = f"✅ Found: **{name or 'Contact'}**"
+                if userid:
+                    result += f" ({userid})"
+                result += "\n\n"
+                if msg_preview:
+                    result += f"   📩 Sent: \"{msg_preview}\"\n\n"
+                result += f"   📧 Email: **{email}**\n"
+                if company:
+                    result += f"   🏢 Company: {company}\n"
+                if phone:
+                    result += f"   📱 Phone: {phone}\n"
+            else:
+                result = f"✅ 找到：**{name or '联系人'}**"
+                if userid:
+                    result += f" ({userid})"
+                result += "\n\n"
+                if msg_preview:
+                    result += f"   📩 发送内容：\"{msg_preview}\"\n\n"
+                result += f"   📧 邮箱：**{email}**\n"
+                if company:
+                    result += f"   🏢 公司：{company}\n"
+                if phone:
+                    result += f"   📱 电话：{phone}\n"
+            return result
+
+        # ── No email found — show what we have ──
+        parts = []
+        if msg_preview:
+            if lang == "en":
+                parts.append(f"📝 **Message search results:**\n{msg_preview}")
+            else:
+                parts.append(f"📝 **消息搜索结果：**\n{msg_preview}")
+        if not parts:
+            if lang == "en":
+                return f"Sorry, no information found related to '{query}'."
+            return f"抱歉，没有找到与「{query}」相关的信息。"
+        return "\n\n".join(parts)
+
 
     # ── Thought capture callback ─────────────────────────────────
     class _ThoughtCapture:

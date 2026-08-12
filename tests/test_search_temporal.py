@@ -61,6 +61,22 @@ def test_parser_absolute_date():
     assert _win(p, "2025年3月") == ("2025-03-01", "2025-03-31")
 
 
+def test_parser_bare_yyyy_mm():
+    """ticket 01: 裸 YYYY-MM 形式必须有规则 (不依赖 LLM 回退)。"""
+    p = TimeExpressionParser()
+    assert _win(p, "2026-07") == ("2026-07-01", "2026-07-31")
+    assert _win(p, "2025-03") == ("2025-03-01", "2025-03-31")
+    # 更具体的 YYYY-MM-DD 不被裸月规则误吞
+    assert _win(p, "2025-03-01") == ("2025-03-01", "2025-03-01")
+
+
+def test_parser_bare_yyyy_mm_allow_llm_off_is_pure_rule():
+    """allow_llm=False 时裸 YYYY-MM 也走规则, 无 LLM 依赖 (eval 确定性)。"""
+    p = TimeExpressionParser(allow_llm=False)
+    assert _win(p, "2026-07 关于 product_inquiry 有什么消息？") == ("2026-07-01", "2026-07-31")
+    assert _win(p, "物流報價") is None
+
+
 def test_parser_no_time_intent_returns_none():
     p = TimeExpressionParser()
     assert _win(p, "物流報價") is None

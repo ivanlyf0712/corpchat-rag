@@ -153,6 +153,35 @@ def snapshot_meta(tool_name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def get_structured_result(tool_name: str) -> Optional[Dict[str, Any]]:
+    """返回最近一次工具调用的结构化结果 `{hits, expanded_queries, filter_used}`。
+
+    agent-smartness-p0 ticket 04: 答案路径直接消费结构化 hits (每个 hit 为
+    {id, text, score, metadata}), 不再从格式化字符串 regex 解析。格式化
+    显示字符串只是渲染层 (LLM 工具调用仍返回字符串, 但结构化通道并行可用)。
+
+    - search_messages / search_messages_where → hits + expanded_queries + filter_used
+    - search_contacts → hits + filter_used={query}
+    - 其余工具 → None
+    """
+    with _TXTAI_LOCK:
+        if tool_name == "search_messages" or tool_name == "search_messages_where":
+            meta = dict(_last_msg_meta)
+            return {
+                "hits": meta.get("raw_hits", []),
+                "expanded_queries": meta.get("expanded_queries", []),
+                "filter_used": meta.get("filter_used", {}),
+            }
+        if tool_name == "search_contacts":
+            meta = dict(_last_contact_meta)
+            return {
+                "hits": meta.get("raw_hits", []),
+                "expanded_queries": [],
+                "filter_used": {"query": meta.get("query", "")},
+            }
+    return None
+
+
 def extract_entity_tags(raw_hits: list) -> List[str]:
     """从搜索命中消息的 metadata 提取实体名 (Hindsight retain 实体锚点)。
 
@@ -503,6 +532,7 @@ def search_messages(query: Optional[str] = None, sender: Optional[str] = None,
             f"OR json_extract(tags, '$.origin') = 5 AND json_extract(tags, '$.external_userid') = '{receiver_uid}')"
         )
     where = " AND ".join(filters) if filters else None
+    _update_msg_meta(filter_used={"sender": sender, "receiver": receiver})
 
     cfg = get_search_config()
     expand = cfg.get("expand", False)
@@ -648,9 +678,11 @@ def search_contacts(query: str) -> str:
         return "No matching contacts found."
 
     previews = []
+    raw_hits = []
     lines = ["【联系人搜索结果】"]
     for i, item in enumerate(raw, 1):
         doc_id = item.get("id", "") if isinstance(item, dict) else (item[0] if isinstance(item, tuple) else "")
+        text = item.get("text", "") if isinstance(item, dict) else (item[1] if isinstance(item, tuple) else "")
         score = item.get("score", 0.0) if isinstance(item, dict) else (item[3] if isinstance(item, tuple) and len(item) >= 4 else 0.0)
         meta = _fetch_doc_metadata(embeddings, doc_id) if doc_id else {}
         if i <= 5:
@@ -658,6 +690,12 @@ def search_contacts(query: str) -> str:
                 "name": meta.get("full_name", "?"),
                 "email": meta.get("email", "-"),
                 "score": round(float(score), 4),
+            })
+            raw_hits.append({
+                "id": doc_id,
+                "text": str(text)[:300],
+                "score": float(score),
+                "metadata": meta or {},
             })
         lines.append(
             f"\n{i}. [Score: {score:.4f}] {meta.get('full_name', '?')} "
@@ -668,7 +706,7 @@ def search_contacts(query: str) -> str:
             f"   Job Title: {meta.get('job_title', '-')}"
         )
 
-    _update_contact_meta(hit_count=len(raw), previews=previews)
+    _update_contact_meta(hit_count=len(raw), previews=previews, raw_hits=raw_hits)
     return "\n".join(lines)
 
 

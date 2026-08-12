@@ -92,11 +92,26 @@ python eval/run_baseline.py --index apps/corpchat/search_index \
 
 # 只看检索成本/延迟 (无 judge 时用 --judge mock 省一半 LLM 调用)
 python eval/run_baseline.py ... --judge mock
+
+# 契约域评估集 (agent-smartness-p0 ticket 05 就绪性产物):
+# 生成 36 条 contract-domain QA (party/company/amount/date/clause/negation),
+# 复用同一 harness 跑基线 (--qa-file 加载预生成 QA):
+python eval/run_baseline.py --index apps/corpchat/search_index \
+    --contacts-index apps/corpchat/contacts_index --qa-file eval/results/contract-qa.json \
+    --seed 7 --spot-check 20 --out /tmp/contract_baseline.json
 ```
 
 报告: answer correctness % · grounded % · hallucination % · 各题型分解 ·
 延迟 p50/p95/avg · token 用量与估算成本。`--spot-check N` 导出人工抽检表
 (judge 与回答器同型号, 需人工校准)。
+
+答案路径 (agent-smartness-p0) 已接入三个确定性控制:
+- **label 过滤 + 时间窗口** (`derive_search_filter`): "2026-07 关于 product_inquiry"
+  类问题按月份窗口 + label 限定检索。
+- **证据门控** (`evidence_passes`): 关键实体/关键词不在检索命中里时, 直接回
+  "没有找到相关证据", 不调用 synthesizer (幻觉控制)。
+- **跨表解析** (`resolve_party_detail`): party-detail 问题 (发过 X 消息的 Y, 他的
+  公司是?) 由确定性联系人解析一步作答, 附 citations + confidence。
 
 ## 项目结构
 

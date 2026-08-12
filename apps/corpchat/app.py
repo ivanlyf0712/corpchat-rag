@@ -937,11 +937,12 @@ def _render_settings_panel(cfg: dict):
 
         with st.expander("⚙️ Search strategy", expanded=False):
             depth_label = st.selectbox(
-                "Search depth", ["Simple", "Deep"],
-                index=0 if cfg["search"].get("depth", "deep") == "simple" else 1,
-                help="Simple = single-step search; Deep = cross-table multi-step reasoning",
+                "Search depth", ["Simple", "Auto", "Deep"],
+                index={"simple": 0, "auto": 1}.get(cfg["search"].get("depth", "deep"), 2),
+                help="Simple = single-step search; Auto = rule-detected agent escalation "
+                     "(multi-hop / cross-session / time only); Deep = always agent",
                 disabled=st.session_state.searching)
-            cfg["search"]["depth"] = "simple" if depth_label == "Simple" else "deep"
+            cfg["search"]["depth"] = {"Simple": "simple", "Auto": "auto"}.get(depth_label, "deep")
             cfg["search"]["expand"] = st.checkbox(
                 "Query expansion", value=cfg["search"].get("expand", True),
                 help="LLM semantic rephrase + keywords", disabled=st.session_state.searching)
@@ -1011,7 +1012,13 @@ def _render_search_page():
     graph_parallel = cfg["search"]["graph_parallel"]
     top_k = cfg["search"]["top_k"]
     label_filter = cfg["search"]["label_filter"]
-    agent_enabled = (cfg["search"]["depth"] == "deep")
+    depth = cfg["search"].get("depth", "deep")
+    if depth == "auto":
+        # 规则检测器 (multi-hop / cross-session / time) 在 query 可用后决定是否
+        # 升级到 agent (见下方 pending_turn 分支); 此处仅作默认占位。
+        agent_enabled = False
+    else:
+        agent_enabled = (depth == "deep")
     st.session_state.agent_enabled = agent_enabled
 
     # ── 布局: 编辑模式 → 配置面板替代聊天面板 (图谱在配置底部) ──
@@ -1029,6 +1036,11 @@ def _render_search_page():
         # If there's a pending processing turn, handle it now
         if pending_turn:
             query = pending_turn["query"]
+            if depth == "auto":
+                # Auto 深度: 规则检测器决定是否升级到 agent (检索优先为默认)
+                from apps.corpchat.search import detect_agent_mode
+                agent_enabled = detect_agent_mode(query) == "agent"
+                st.session_state.agent_enabled = agent_enabled
 
             # ── Intent gate: greeting/system_info/clarify skip search ──
             # Use Agent.process() to leverage LLM-generated greetings and DB-backed memory

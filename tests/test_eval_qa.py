@@ -106,6 +106,115 @@ def test_judge_answer_mock_failure_path():
 
 
 # ── LiteLLM usage capture ──────────────────────────────────────────
+# ── Eval answer path (agent-smartness-p0: gate + party resolver) ────
+class _FakeSearcher:
+    """Deterministic Searcher stand-in for answer_question tests."""
+
+    def __init__(self, hits, **kwargs):
+        self.hits = hits
+        self.last_kwargs = None
+
+    def search(self, query, **kwargs):
+        self.last_kwargs = kwargs
+        return list(self.hits)
+
+
+class _CountingLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, *a, **k):
+        self.calls += 1
+        return "合成的答案"
+
+
+def test_answer_question_gate_fail_short_circuits_synthesizer():
+    """门控失败 → 直接返回 NOT_FOUND_ANSWER, 不调用 synthesizer (无成本)。"""
+    from eval.run_baseline import answer_question
+    from apps.corpchat.search.answer_path import NOT_FOUND_ANSWER
+
+    # 检索命中与问题不匹配 (错误发送者/主题) → 门控失败
+    hits = [{"id": "m1", "text": "李雅婷 (product_inquiry)\n---\n報價已發送",
+             "metadata": {"customer_name": "李雅婷", "label": "product_inquiry"}}]
+    searcher = _FakeSearcher(hits)
+    llm = _CountingLLM()
+
+    resp = answer_question("胡志強 说了什么关于 國榮 的内容？", searcher, llm,
+                           known_labels=["product_inquiry"], contacts=[])
+    assert resp["answer"] == NOT_FOUND_ANSWER
+    assert resp["raw_hits"] == []
+    assert resp["citations"] == []
+    assert resp["confidence"] == "low"
+    assert resp["evidence_gate"] is False
+    assert llm.calls == 0, "门控失败时 synthesizer 不应被调用"
+
+
+def test_answer_question_party_detail_deterministic():
+    """party-detail 问题 → 确定性 resolver 一步回答, 不调 synthesizer。"""
+    from eval.run_baseline import answer_question
+
+    hits = [{"id": "m1", "text": "廖珮琪 (payment_reminder)\n---\n珮琪 抱歉 抱歉",
+             "metadata": {"customer_name": "廖珮琪", "label": "payment_reminder"}}]
+    contacts = [{"full_name": "廖珮琪", "userid": "user_廖珮琪_pchen",
+                 "company": "勤業眾信", "email": "williamanderson@example.com"}]
+    searcher = _FakeSearcher(hits)
+    llm = _CountingLLM()
+
+    resp = answer_question("发过关于 這個 的消息的 廖珮琪，他的公司是？", searcher, llm,
+                           known_labels=["payment_reminder"], contacts=contacts)
+    assert "勤業眾信" in resp["answer"]
+    assert "williamanderson@example.com" in resp["answer"]
+    assert resp["party_deterministic"] is True
+    assert resp["confidence"] == "high"
+    assert llm.calls == 0, "party-detail 确定性路径不应调用 synthesizer"
+    assert resp["raw_hits"][0]["id"].startswith("contact:"), "联系人记录应作为证据"
+
+
+def test_answer_question_passes_label_and_window_filter():
+    """answer path 把 derive_search_filter 的 label + 窗口传给检索 seam。"""
+    from eval.run_baseline import answer_question
+
+    searcher = _FakeSearcher([])
+    llm = _CountingLLM()
+    resp = answer_question("2026-07 关于 product_inquiry 有什么消息？", searcher, llm,
+                           known_labels=["product_inquiry"], contacts=[])
+    assert searcher.last_kwargs["label_filter"] == "product_inquiry"
+    assert searcher.last_kwargs["date_from"] == "2026-07-01"
+    assert searcher.last_kwargs["date_to"] == "2026-07-31"
+    # 空 hits → 门控失败 → 诚实 not-found
+    assert resp["answer"] == "没有找到相关证据"
+
+
+# ── Contract-domain eval set (ticket 05) ───────────────────────────
+def test_generate_contract_qa_deterministic_and_grounded():
+    from eval.contract_qa import generate_contract_qa, _CONTRACT_LABELS
+
+    qa1 = generate_contract_qa(_CORPUS, contacts=_CONTACTS, seed=7, n=30)
+    qa2 = generate_contract_qa(_CORPUS, contacts=_CONTACTS, seed=7, n=30)
+    assert qa1 == qa2, "same seed must give the same contract QA set"
+    assert qa1, "should produce contract QA pairs"
+    types = {i["type"] for i in qa1}
+    assert types <= {"contract_party", "contract_company", "contract_amount",
+                     "contract_date", "contract_clause", "contract_negation"}
+    ids = {m["id"] for m in _CORPUS}
+    for item in qa1:
+        assert item["question"] and item["expected"]
+        if item["type"] != "contract_negation":
+            assert item["evidence"], f"non-negation missing evidence: {item}"
+            assert all(e in ids for e in item["evidence"]), f"evidence not in corpus: {item}"
+        # only contract-like labels are used
+        assert item.get("label", "") in _CONTRACT_LABELS or item["type"] == "contract_negation"
+
+
+def test_contract_amount_normalized():
+    from eval.contract_qa import _normalize_amount, _extract_amount
+    assert _normalize_amount("¥ 320 , 000") == "¥320,000"
+    assert _extract_amount("合約 上 是 ¥ 320 , 000") == "¥320,000"
+    assert _extract_amount("調漲 8%") == "8%"
+    assert _extract_amount("沒有金額的訊息") is None
+
+
+# ── LiteLLM usage capture ──────────────────────────────────────────
 def test_usage_capture():
     from apps.corpchat.search.litellm_client import LiteLLMClient, reset_usage, usage_total
 

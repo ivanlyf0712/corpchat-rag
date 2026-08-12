@@ -64,9 +64,13 @@ class TimeExpressionParser:
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         model: str = LITELLM_MODEL,
+        allow_llm: bool = True,
     ):
         self._client = LiteLLMClient(api_base=api_base, api_key=api_key, model=model)
         self._cache: Dict[str, Optional[TimeWindow]] = {}
+        # allow_llm=False → 纯规则解析 (确定性, 无 API 调用)。用于 eval/answer path
+        # 等需要可复现结果的场景; 规则未命中的查询直接返回 None。
+        self.allow_llm = allow_llm
 
     def parse(self, query: str, now: Optional[datetime] = None) -> Optional[TimeWindow]:
         """返回查询中的时间窗口; 无时间意图返回 None (不改变检索行为)。"""
@@ -78,7 +82,7 @@ class TimeExpressionParser:
         now = now or datetime.now()
 
         window = self._parse_rules(query, now)
-        if window is None and self._needs_llm(query):
+        if window is None and self.allow_llm and self._needs_llm(query):
             window = self._parse_llm(query, now)
 
         self._cache[cache_key] = window
@@ -173,6 +177,14 @@ class TimeExpressionParser:
         if m:
             d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
             return TimeWindow(start=_iso(d), end=_iso(d), matched=m.group(0))
+
+        # 裸 YYYY-MM (2026-07): 整月窗口。必须放在 YYYY-MM-DD 之后 (更具体的规则优先),
+        # 否则 "2026-07-01" 会被裸月规则误吞成整月窗口。
+        m = re.search(r"(\d{4})-(\d{1,2})", query)
+        if m:
+            d = datetime(int(m.group(1)), int(m.group(2)), 1)
+            end_d = (d.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+            return TimeWindow(start=_iso(d), end=_iso(end_d), matched=m.group(0))
 
         m = re.search(r"(\d{4})年(\d{1,2})月", query)
         if m:
