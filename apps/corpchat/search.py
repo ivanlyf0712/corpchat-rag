@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
 """
-CorpChat Search CLI — 精炼版 Onyx 风格搜索框架
+CorpChat Search CLI — 精煉版搜尋框架
 ================================================
-基于 analysis_report.md 的设计蓝图构建，整合 txtai 高性能索引。
+基於 analysis_report.md 的設計藍圖建構，整合 txtai 高效能索引。
 
-核心机制 (对照 Onyx):
+核心機制:
   1. 索引管道 (§2.1-§2.3):
-     - 句子级分块 (chonkie SentenceChunker, chunk_size=256 tokens)
-     - 块丰富化 (标题 + 内容 + 元数据 → 嵌入文本)
-     - 双重索引: 丰富化文本 (语义) + 原始文本 (关键词)
+      - 句子級分塊 (chonkie SentenceChunker, chunk_size=256 tokens)
+      - 塊豐富化 (標題 + 內容 + 元資料 → 嵌入文本)
+      - 雙重索引: 豐富化文本 (語意) + 原始文本 (關鍵字)
   2. 搜索管道 (§2.5-§2.8):
-     - 多查询扩展: 语义重写 + 关键词提取 (LiteLLM)
-     - 加权 RRF 融合 (原始 0.5 / 语义 1.3 / 关键词 1.0, k=50)
-     - 混合搜索 (txtai hybrid: BM25 + 向量)
-     - 图增强 (邻居一跳, 仅对 top-3 扩展, 折扣得分)
-     - 交叉编码器重排序 (rerank_top_n=20)
+      - 多查詢擴展: 語意重寫 + 關鍵字提取 (LiteLLM)
+      - 加權 RRF 融合 (原始 0.5 / 語意 1.3 / 關鍵字 1.0, k=50)
+      - 混合搜尋 (txtai hybrid: BM25 + 向量)
+      - 圖增強 (鄰居一跳, 僅對 top-3 擴展, 折扣得分)
+      - 交叉編碼器重排序 (rerank_top_n=20)
   3. Agentic 决策 (§2.7):
-     - 规则优先 + 复杂度分析 + LLM 回退
+      - 規則優先 + 複雜度分析 + LLM 回退
      - 决定: mode, expand, graph_expand, use_rerank
 
 使用方法:
   python apps/corpchat/search.py build [--force] [--graph-mode auto|llm|off]
-  python apps/corpchat/search.py search "诈骗" --mode hybrid --expand
+  python apps/corpchat/search.py search "詐騙" --mode hybrid --expand
   python apps/corpchat/search.py benchmark --runs 20
   python apps/corpchat/search.py validate
 
 依赖:
   pip install txtai psycopg2 click tabulate chonkie sentence-transformers
-  可选: python-dotenv (环境变量)
+  可選: python-dotenv (環境變數)
 """
 
 import os
@@ -46,22 +46,22 @@ import click
 import txtai
 from tabulate import tabulate
 
-# ── 中文分词 (jieba) ─────────────────────────────────────────────
+# ── 中文分詞 (jieba) ─────────────────────────────────────────────
 try:
     import jieba
-    jieba.setLogLevel(20)  # silence jieba's build-dict logging
+    jieba.setLogLevel(20)  # 靜音 jieba 的建字典日誌
     _JIEBA_AVAILABLE = True
 except ImportError:
     _JIEBA_AVAILABLE = False
 
-# ── 环境变量 (.env) ─────────────────────────────────────────────
+# ── 環境變數 (.env) ─────────────────────────────────────────────
 try:
     from dotenv import load_dotenv
     load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 except ImportError:
     pass
 
-# ── 路径 & 配置 ──────────────────────────────────────────────────
+# ── 路徑 & 配置 ──────────────────────────────────────────────────
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -78,7 +78,7 @@ except ImportError:
     }
 
 
-# ── 日志 ─────────────────────────────────────────────────────────
+# ── 日誌 ─────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     level=logging.INFO,
@@ -87,60 +87,60 @@ logger = logging.getLogger("corpchat-search")
 
 # ═══════════════════════════════════════════════════════════════════
 # 1. 配置与常量
-#    参考 analysis_report.md §2.2 (分块), §2.8 (RRF), §2.7 (权重)
+#    參考 analysis_report.md §2.2 (分塊), §2.8 (RRF), §2.7 (權重)
 # ═══════════════════════════════════════════════════════════════════
 
-# 嵌入模型: 本地缓存优先 (默认 bge-m3 — 中文检索能力)
+# 嵌入模型: 本地快取優先 (預設 bge-m3 — 中文檢索能力)
 _EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
 _LOCAL_MODEL_PATH = os.path.join(ROOT_DIR, "models", "bge-m3")
 if os.path.isdir(_LOCAL_MODEL_PATH):
     _EMBED_MODEL = _LOCAL_MODEL_PATH
 
-# 索引路径
+# 索引路徑
 DEFAULT_INDEX_PATH = os.getenv("INDEX_PATH", os.path.join(os.path.dirname(__file__), "search_index"))
 
-# 分块参数 (§2.2)
+# 分塊參數 (§2.2)
 DEFAULT_CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "256"))
 DEFAULT_CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "0"))
 
-# 搜索参数 (§2.5, §2.8)
+# 搜尋參數 (§2.5, §2.8)
 DEFAULT_HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.5"))
 RRF_K_VALUE = 50
 MAX_SEARCH_LIMIT = 100
-# 重排序模型: 中文能力 (BAAI/bge-reranker-base — 中文/多语言交叉编码器)
+# 重排序模型: 中文能力 (BAAI/bge-reranker-base — 中文/多語言交叉編碼器)
 DEFAULT_RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base")
 DEFAULT_RERANK_TOP_N = 20
 
-# 查询权重 (§2.7 的 constants.py)
+# 查詢權重 (§2.7 的 constants.py)
 ORIGINAL_QUERY_WEIGHT = 0.5
 LLM_SEMANTIC_QUERY_WEIGHT = 1.3
 LLM_KEYWORD_QUERY_WEIGHT = 1.0
 
-# LiteLLM 配置 (密钥必须从环境变量提供, 不硬编码)
+# LiteLLM 配置 (密鑰必須從環境變數提供, 不硬編碼)
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
 LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "https://your-litellm-proxy.example.com/")
 LITELLM_MODEL = os.getenv("LITELLM_MODEL", "dseek-v4-flash")
 
-# 富文本 Metadata 格式标记 (已弃用 — 元数据现存于 sections.tags 列)
+# 富文本 Metadata 格式標記 (已棄用 — 元資料現存於 sections.tags 列)
 _METADATA_MARKER = "\n---\nMetadata: "
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 辅助: 从 enriched text 中提取干净内容
+# 輔助: 從 enriched text 中提取乾淨內容
 #     metadata 现从 sections.tags 列按 id 查询 (见 _fetch_one_doc),
 #     不再从文本字符串中反向解析。
 # ═══════════════════════════════════════════════════════════════════
 
 def _clean_text_from_enriched(text: str) -> str:
     """
-    从 enriched text 中提取干净的内容文本 (去掉 title 前缀和 metadata 后缀)。
+    從 enriched text 中提取乾淨的內容文本 (去掉 title 前綴和 metadata 後綴)。
     
-    返回: 去除了标题行和 Metadata 部分的原始消息内容。
+    返回: 去除了標題行和 Metadata 部分的原始訊息內容。
     """
-    # 去掉 Metadata 后缀 (兼容旧索引)
+    # 去掉 Metadata 後綴 (兼容舊索引)
     if _METADATA_MARKER in text:
         text = text.split(_METADATA_MARKER)[0]
-    # 去掉 title 前缀 (第一行 "---" 之前的内容和 "---" 分隔符)
+    # 去掉 title 前綴 (第一行 "---" 之前的內容和 "---" 分隔符)
     parts = text.split("\n---\n", 1)
     if len(parts) > 1:
         return parts[1]
@@ -149,11 +149,11 @@ def _clean_text_from_enriched(text: str) -> str:
 
 def _segment(text: str) -> str:
     """
-    使用 jieba 对中文文本进行分词, 以空格连接。
+    使用 jieba 對中文文本進行分詞, 以空格連接。
 
-    使 txtai 默认的 Unicode 分词器能按 jieba 的词语边界切分中文,
-    从而让 BM25 能匹配未加空格的中文短语 (如 投資美國債券跟藍籌股)。
-    索引与查询两侧使用同一分词器, 保证一致性。
+    使 txtai 預設的 Unicode 分詞器能按 jieba 的詞語邊界切分中文,
+    從而讓 BM25 能匹配未加空格的中文短語 (如 投資美國債券跟藍籌股)。
+    索引與查詢兩側使用同一分詞器, 保證一致性。
     """
     if not text:
         return text
@@ -164,9 +164,9 @@ def _segment(text: str) -> str:
 
 def _compute_structural_relationships(chunks: List[Dict]) -> Dict[str, List[Dict]]:
     """
-    从分块元数据计算五个结构关系, 返回 {chunk_id: [relationships]}.
+    從分塊元資料計算五個結構關係, 返回 {chunk_id: [relationships]}.
 
-    关系类型: same_conversation, sender_receiver, same_sender, same_company, same_label.
+    關係類型: same_conversation, sender_receiver, same_sender, same_company, same_label.
     """
     metas = {chunk["id"]: chunk.get("metadata", {}) for chunk in chunks}
     relationships: Dict[str, List[Dict]] = {cid: [] for cid in metas}
@@ -217,7 +217,7 @@ class IndexBuilder:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
-    # ── 数据读取 ──────────────────────────────────────────────
+# 中文分詞 (jieba) ─────────────────────────────────────────────
     def _fetch_messages(self) -> List[Dict]:
         """从 PostgreSQL 读取消息及关联联系人信息。"""
         conn = psycopg2.connect(**DB_CONFIG)
@@ -451,7 +451,7 @@ class QueryExpander:
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"].strip()
         except Exception as e:
-            logger.warning(f"LLM 调用失败: {e}")
+            logger.warning(f"LLM 呼叫失敗: {e}")
             return ""
 
     def _semantic_rephrase(self, query: str) -> Optional[str]:
@@ -825,23 +825,23 @@ class Searcher:
         use_rerank: bool = True,
     ) -> List[Dict]:
         """
-        执行搜索 (默认启用全链路 Onyx 风格搜索)。
-        
-        全链路 = LLM 查询扩展 + 混合搜索 + RRF 融合 + 交叉编码器重排序。
-        
-        当 expand=True 且 self.expander 可用时:
-          - 生成语义重写 + 关键词扩展查询
-          - 每条查询独立执行 txtai hybrid search
-          - 加权 RRF 融合所有结果
-          - Reranker 对 RRF 融合后的 top-N 重排序
-        返回 RRF 分数 (小数值)。
-        
-        当 expand=False 或 expander 不可用时:
-          - 直接执行 txtai hybrid search
-          - 分数 0~1 (原生向量+BM25)
-        
-        use_rerank=True 且 reranker 可用时:
-          - 对最终 top-20 结果用交叉编码器重排序
+        執行搜尋（預設啟用完整搜尋鏈路）。
+
+        完整鏈路 = LLM 查詢擴展 + 混合搜尋 + RRF 融合 + 交叉編碼器重排序。
+
+        當 expand=True 且 self.expander 可用時：
+          - 產生語意改寫 + 關鍵字擴展查詢
+          - 每條查詢獨立執行 txtai hybrid search
+          - 以加權 RRF 融合所有結果
+          - Reranker 對 RRF 融合後的 top-N 重排序
+        回傳 RRF 分數（較小的數值）。
+
+        當 expand=False 或 expander 不可用時：
+          - 直接執行 txtai hybrid search
+          - 分數 0~1（原生向量 + BM25）
+
+        use_rerank=True 且 reranker 可用時：
+          - 對最終 top-20 結果使用交叉編碼器重排序
         """
         weight_map = {
             "keyword": (0.0, 1.0),

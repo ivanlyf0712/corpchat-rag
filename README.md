@@ -1,24 +1,24 @@
 # CorpChat RAG
 
-企业微信对话智能搜索与 RAG 系统。基于 txtai 混合搜索 + LLM 查询扩展 + 交叉编码器重排序的 Onyx 风格搜索框架。
+企業微信對話智能搜尋與 RAG 系統。基於 txtai 混合搜尋 + LLM 查詢擴展 + 交叉編碼器重排序的搜尋框架。
 
 ## 功能特性
 
-- 🔍 **Onyx 风格搜索**: 混合搜索 (BM25 + 向量) + LLM 查询扩展 + 加权 RRF 融合
-- 🕸️ **图增强搜索**: 基于 txtai 图的一跳邻居扩展
+- 🔍 **高级搜尋**: 混合搜尋 (BM25 + 向量) + LLM 查詢擴展 + 加權 RRF 融合
+- 🕸️ **圖增強搜尋**: 基於 txtai 圖的一跳鄰居擴展
 - ⚡ **交叉编码器重排序**: 使用 cross-encoder/ms-marco-MiniLM-L-6-v2
-- 💬 **Streamlit 交互界面**: 联系人、消息、聊天记录、语义搜索一体化
-- 🤖 **RAG 问答**: 基于 LiteLLM 的自然语言答案生成
+- 💬 **Streamlit 互動介面**: 聯絡人、訊息、聊天記錄、語意搜尋一體化
+- 🤖 **RAG 問答**: 基於 LiteLLM 的自然語言答案生成
 
 ## 快速开始
 
-### 1. 安装依赖
+### 1. 安裝依賴
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. 配置数据库
+### 2. 配置資料庫
 
 编辑 `core/config.py` 或设置环境变量:
 
@@ -30,34 +30,34 @@ export DB_USER=ocr
 export DB_PASSWORD=***REMOVED***
 ```
 
-### 3. 生成测试数据
+### 3. 生成測試資料
 
 ```bash
 python apps/corpchat/gen_fake_msg.py
 ```
 
-### 4. 构建搜索索引
+### 4. 建立搜尋索引
 
 ```bash
 python apps/corpchat/search.py build --force
 ```
 
-### 5. 启动 Streamlit 应用
+### 5. 啟動 Streamlit 應用
 
 ```bash
 streamlit run apps/corpchat/app.py
 ```
 
-## 搜索 CLI
+## 搜尋 CLI
 
 ```bash
-# 构建索引
+# 建立索引
 python apps/corpchat/search.py build --force --graph-mode auto
 
-# 搜索 (全链路模式)
+# 搜尋（完整鏈路模式）
 python apps/corpchat/search.py search "诈骗" --mode hybrid --expand --rerank
 
-# 合成测试基准
+# 合成測試基準
 python apps/corpchat/search.py synthetic-benchmark
 ```
 

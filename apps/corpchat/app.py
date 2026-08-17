@@ -21,23 +21,23 @@ if ROOT_DIR not in sys.path:
 from core.db import get_db_connection
 from core.config import OLLAMA_URL, RAG_MODEL
 
-# ── Load .env explicitly so the UI can reach LiteLLM & search config ──
+# ── 明確載入 .env，讓 UI 能讀取 LiteLLM 與搜尋設定 ──
 try:
     from dotenv import load_dotenv
     load_dotenv(os.path.join(ROOT_DIR, ".env"))
 except ImportError:
     pass
 
-# ── Import Onyx-style search from search.py ──
+# ── 從 search.py 匯入搜尋模組 ──
 from apps.corpchat.search import (
     load_index,
     Searcher,
     DEFAULT_INDEX_PATH,
 )
 
-# ── LiteLLM 配置（密钥必须从环境变量提供, 不硬编码）──
+# ── LiteLLM 設定（密鑰必須從環境變數提供，不可硬編碼）──
 import os as _os
-LITELLM_API_KEY = _os.getenv("LITELLM_API_KEY", "")   # 从环境变量读取
+LITELLM_API_KEY = _os.getenv("LITELLM_API_KEY", "")   # 從環境變數讀取
 LITELLM_BASE_URL = _os.getenv("LITELLM_BASE_URL", "https://your-litellm-proxy.example.com")
 LITELLM_MODEL = _os.getenv("LITELLM_MODEL", "dseek-v4-flash")
 
@@ -48,8 +48,130 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-st.title("🕵️ CorpChat Intelligence")
-st.markdown("### Corporate Relationship & Chat Analytics")
+st.markdown(
+    """
+    <style>
+    :root {
+        --page-bg: #f5f7fb;
+        --surface: #ffffff;
+        --surface-soft: #f8fafc;
+        --border: #dbe4ee;
+        --text: #1f2937;
+        --muted: #6b7280;
+        --accent: #2f6fed;
+        --accent-soft: rgba(47, 111, 237, 0.10);
+        --success-soft: rgba(16, 185, 129, 0.10);
+        --warning-soft: rgba(245, 158, 11, 0.10);
+    }
+
+    .stApp {
+        background: linear-gradient(180deg, #f8fbff 0%, var(--page-bg) 100%);
+        color: var(--text);
+    }
+
+    header[data-testid="stHeader"] {
+        background: transparent;
+    }
+
+    .block-container {
+        padding-top: 1.6rem;
+        padding-bottom: 2.25rem;
+    }
+
+    h1, h2, h3 {
+        color: var(--text);
+        letter-spacing: -0.02em;
+    }
+
+    [data-testid="stMarkdownContainer"] p {
+        color: var(--muted);
+    }
+
+    div[data-testid="stMetric"] {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 1rem 1.1rem;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+    }
+
+    div[data-baseweb="tab-list"] {
+        gap: 0.35rem;
+        padding: 0.2rem;
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+    }
+
+    button[data-baseweb="tab"] {
+        border-radius: 12px !important;
+        padding: 0.55rem 0.85rem !important;
+        color: var(--muted) !important;
+    }
+
+    button[data-baseweb="tab"][aria-selected="true"] {
+        background: var(--accent-soft) !important;
+        color: var(--accent) !important;
+        font-weight: 600 !important;
+    }
+
+    .stButton > button {
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+        color: var(--text);
+        transition: all 0.2s ease;
+    }
+
+    .stButton > button:hover {
+        border-color: rgba(47, 111, 237, 0.35);
+        box-shadow: 0 8px 20px rgba(47, 111, 237, 0.10);
+        transform: translateY(-1px);
+    }
+
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(180deg, #3778ff 0%, #2f6fed 100%);
+        color: white;
+        border-color: #2f6fed;
+    }
+
+    .stButton > button[kind="secondary"] {
+        background: #ffffff;
+    }
+
+    .stDataFrame, .stTable {
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        overflow: hidden;
+        background: var(--surface);
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+    }
+
+    .stExpander {
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        background: var(--surface);
+    }
+
+    [data-testid="stChatMessage"] {
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        background: var(--surface);
+        padding: 0.25rem 0.5rem;
+    }
+
+    .stAlert {
+        border-radius: 14px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown("## CorpChat Intelligence")
+st.markdown("**Corporate relationship and chat analytics**")
+
+st.caption("A clean workspace for contacts, messages, conversations, and search.")
 
 # ═══════════════════════════════════════ helpers ════════════════════════════════════
 @st.cache_data(ttl=30)
@@ -193,23 +315,23 @@ def get_messages_for_conversation(open_kfid):
         st.warning(f"Messages for conversation unavailable: {e}")
         return pd.DataFrame()
 
-# ════════════════════════════════ Onyx 风格搜索（由 search.py 提供）═══════════════════════
+# ════════════════════════════════ 搜尋功能（由 search.py 提供）═══════════════════════
 @st.cache_resource
 def _load_search_index():
-    """加载 search.py 构建的索引（带分块+丰富化），返回 txtai Embeddings。"""
+    """載入 search.py 建立的索引（含分塊與豐富化），回傳 txtai Embeddings。"""
     try:
         return load_index(DEFAULT_INDEX_PATH)
     except FileNotFoundError:
         st.warning(
-            "search_index 索引不存在。请先运行 `python apps/corpchat/search.py build --force` "
-            "来构建带分块和丰富化的搜索索引。"
+            "search_index 索引不存在。請先執行 `python apps/corpchat/search.py build --force` "
+            "來建立含分塊與豐富化的搜尋索引。"
         )
         return None
 
-# ── 复用 search.py 的 _clean_text_from_enriched ──
+# ── 重用 search.py 的 _clean_text_from_enriched ──
 from apps.corpchat.search import _clean_text_from_enriched as _search_clean_text
 
-def search_messages_onyx(
+def search_messages(
     query: str,
     label_filter: str | None = None,
     date_from: str | None = None,
@@ -221,28 +343,28 @@ def search_messages_onyx(
     agentic: bool = False,
 ):
     """
-    使用 search.py 的 Searcher (Onyx §2.5-§2.8) 执行 **全链路** 搜索。
+    使用 search.py 的 Searcher 執行 **完整鏈路** 搜尋。
 
-    默认启用所有增强功能 (最强大模式):
-      - LLM 查询扩展 + 多查询加权 RRF 融合 (expand=True)
-      - 图一跳邻居扩展 (graph_expand=1)
-      - 交叉编码器重排序 (use_rerank=True)
+    預設啟用所有增強功能（最強模式）：
+      - LLM 查詢擴展 + 多查詢加權 RRF 融合（expand=True）
+      - 圖一跳鄰居擴展（graph_expand=1）
+      - 交叉編碼器重排序（use_rerank=True）
 
-    当 agentic=True 时, 使用 AgenticDecider 根据查询内容自动决定
-    mode / expand / graph_expand / use_rerank, 覆盖手动传入的参数。
+    當 agentic=True 時，使用 AgenticDecider 根據查詢內容自動決定
+    mode / expand / graph_expand / use_rerank，覆蓋手動傳入的參數。
 
-    Searcher 已修复:
-      - metadata 从 enriched text 的 "Metadata: key=value;..." 后缀中反向解析
-      - label 过滤和日期过滤使用正确解析的 metadata
-      - 内容文本可通过 _clean_text_from_enriched() 提取干净内容
+    Searcher 已修正：
+      - metadata 從 enriched text 的 "Metadata: key=value;..." 後綴中反向解析
+      - label 過濾和日期過濾使用正確解析的 metadata
+      - 內容文字可透過 _clean_text_from_enriched() 擷取乾淨內容
 
-    返回格式: [(msgid, content, send_time, external_userid, servicer_userid, label, score), ...]
+    回傳格式：[(msgid, content, send_time, external_userid, servicer_userid, label, score), ...]
     """
     embeddings = _load_search_index()
     if embeddings is None:
         return []
 
-    # Agentic decision: let AgenticDecider pick mode/expand/graph/rerank per query
+    # Agentic 決策：讓 AgenticDecider 依查詢內容選擇 mode / expand / graph / rerank
     if agentic:
         from apps.corpchat.search import AgenticDecider
         decision = AgenticDecider().decide(query)
@@ -324,7 +446,7 @@ Relevant messages:
 
 Answer:"""
 
-    # 调用 LiteLLM (OpenAI-compatible endpoint)
+    # 呼叫 LiteLLM（OpenAI 相容端點）
     url = f"{LITELLM_BASE_URL}/chat/completions"
     headers = {
         "Authorization": f"Bearer {LITELLM_API_KEY}",
@@ -342,96 +464,21 @@ Answer:"""
     }
     try:
         resp = requests.post(url, json=payload, headers=headers, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-    except requests.exceptions.Timeout:
-        return "(Request timed out)"
-    except Exception as e:
-        return f"(Error: {e})"
-
-# ═══════════════════════════════════════════════ Tabs ═══════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📋 Contacts", "💬 Messages", "📊 Overview", "💬 Chat Viewer", "🔍 Search", "🤖 Onyx Chat"
-])
-
-# ──────────── Tab 1: Contacts ────────────
-with tab1:
-    st.subheader("Business Card Contacts")
-    df_contacts = fetch_contacts()
-    if not df_contacts.empty:
-        st.metric("Total Contacts", len(df_contacts))
-        st.dataframe(df_contacts, width='stretch')
-    else:
-        st.info("No contacts found. Run the data generator or OCR pipeline to populate contacts.")
-
-# ──────────── Tab 2: Messages ────────────
-with tab2:
-    st.subheader("WeChat Work Messages")
-    df_msgs = fetch_messages()
-    if not df_msgs.empty:
-        st.metric("Messages (last 500)", len(df_msgs))
-        origin_map = {3: "Customer", 4: "System", 5: "Agent"}
-        if 'origin' in df_msgs.columns:
-            df_msgs['origin'] = df_msgs['origin'].map(origin_map)
-        st.dataframe(df_msgs, width='stretch')
-    else:
-        st.info("No messages found. Generate some conversations first.")
-
-# ──────────── Tab 3: Overview ────────────
-with tab3:
-    st.subheader("Database Overview")
-    total_contacts, total_msgs, total_convos, label_counts = fetch_stats()
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Contacts", total_contacts)
-    with col2:
-        st.metric("Total Messages", total_msgs)
-    with col3:
-        st.metric("Unique Conversations", total_convos)
-
-    st.subheader("Messages by Label")
-    if label_counts:
-        df_labels = pd.DataFrame(label_counts, columns=["Label", "Count"])
-        st.bar_chart(df_labels.set_index("Label"))
-    else:
-        st.info("No labels found. Labels are assigned during message generation (e.g., normal, scam_crypto).")
-
-# ── 已知标签列表（与 gen_fake_msg.py CONVERSATION_TEMPLATES 一致）──
 KNOWN_LABELS = [
-    "product_inquiry", "order_confirmation", "tech_support", "meeting_schedule",
-    "invoice_issue", "vendor_evaluation", "software_license", "contract_renewal",
-    "delivery_status", "product_demo", "payment_reminder", "quotation_request",
-    "coordination", "sample_request", "training_program", "system_upgrade",
-    "business_proposal", "after_service", "quality_issue", "marketing_campaign",
-    "recruitment", "equipment_maintenance", "order_change", "warranty_claim",
-    "annual_review", "warehouse_transfer", "partnership_discussion",
-    "equipment_quote", "factory_audit",
-    "old_friend_reconnect", "investment_opportunity",
-]
-
-# ──────────── Tab 4: Chat Viewer ────────────
-with tab4:
-    st.subheader("Conversation Viewer")
-
-    # Initialize session state for selected conversation
+    if label_counts:
+def render_chat_view():
+    st.subheader("Chat")
+    st.caption("Select a conversation on the left and read or respond on the right.")
     if "selected_kfid" not in st.session_state:
         st.session_state.selected_kfid = None
 
     col_left, col_right = st.columns([1, 2], gap="medium")
-
     with col_left:
-        label_filter = st.selectbox(
-            "Label filter",
-            options=["All"] + KNOWN_LABELS,
-            index=0,
-        )
-        search_term = st.text_input("Search participant", placeholder="name or userid")
+        st.markdown("#### Conversations")
+        label_filter = st.selectbox("Label", options=["All"] + KNOWN_LABELS, index=0)
+        search_term = st.text_input("Find a person", placeholder="name or user ID")
         label_filter = None if label_filter == "All" else label_filter
-
         conversations = get_conversation_list(label_filter, search_term if search_term else None)
-
         if not conversations:
             st.info("No conversations match the filters.")
         else:
@@ -440,142 +487,118 @@ with tab4:
                 name = conv["display_name"]
                 snippet = conv["snippet"]
                 last_time = conv["last_time"]
-                # Relative time
                 now = datetime.now(timezone.utc)
                 if last_time.tzinfo is None:
                     last_time = last_time.replace(tzinfo=timezone.utc)
                 diff = now - last_time
-                if diff.days == 0:
-                    time_str = "today"
-                elif diff.days == 1:
-                    time_str = "yesterday"
-                else:
-                    time_str = f"{diff.days}d ago"
-
-                if st.button(
-                    f"**{name}**  \n{snippet}  \n_{time_str}_",
-                    key=f"chat_{kfid}",
-                    use_container_width=True
-                ):
+                time_str = "today" if diff.days == 0 else "yesterday" if diff.days == 1 else f"{diff.days}d ago"
+                if st.button(f"**{name}**  \n{snippet}  \n_{time_str}_", key=f"chat_{kfid}", use_container_width=True):
                     st.session_state.selected_kfid = kfid
 
     with col_right:
+        st.markdown("#### Conversation")
         if st.session_state.selected_kfid is None:
-            st.info("👈 Select a conversation from the list to view the chat.")
+            st.info("Select a conversation from the list to view the chat.")
         else:
             kfid = st.session_state.selected_kfid
-            st.markdown(f"### Conversation {kfid}")
             msgs = get_messages_for_conversation(kfid)
-
             if msgs.empty:
                 st.warning("No messages found for this conversation.")
             else:
                 name_map = get_contact_name_map()
-                last_date = None
-                for idx, row in msgs.iterrows():
-                    msg_date = row["send_time"].date()
-                    if msg_date != last_date:
-                        st.markdown(f"--- **{msg_date.strftime('%Y-%m-%d')}** ---")
-                        last_date = msg_date
+                with st.container():
+                    last_date = None
+                    for _, row in msgs.iterrows():
+                        msg_date = row["send_time"].date()
+                        if msg_date != last_date:
+                            st.markdown(f"**{msg_date.strftime('%Y-%m-%d')}**")
+                            last_date = msg_date
+                        if row["origin"] == 3:
+                            sender_name = name_map.get(row["external_userid"], row["external_userid"])
+                            role = "user"
+                        else:
+                            sender_name = name_map.get(row["servicer_userid"], row.get("servicer_userid", "System"))
+                            role = "assistant"
+                        with st.chat_message(role):
+                            st.markdown(f"**{sender_name}**  \n{row['content']}")
+                            st.caption(row["send_time"].strftime("%H:%M"))
+            with st.form("reply_form"):
+                reply_text = st.text_area("Your message", placeholder="Type a response...")
+                submitted = st.form_submit_button("Send")
+                if submitted:
+                    st.success("Reply drafted. Wire this to your sending flow if needed.")
 
-                    if row["origin"] == 3:
-                        sender_name = name_map.get(row["external_userid"], row["external_userid"])
-                        role = "user"
-                    else:
-                        sender_name = name_map.get(row["servicer_userid"], row.get("servicer_userid", "System"))
-                        role = "assistant"
 
-                    with st.chat_message(role):
-                        st.markdown(f"**{sender_name}**  \n{row['content']}")
-                        st.caption(row["send_time"].strftime("%H:%M"))
+def render_view_data():
+    st.subheader("View Data")
+    total_contacts, total_msgs, total_convos, label_counts = fetch_stats()
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Contacts", total_contacts)
+    with col2:
+        st.metric("Messages", total_msgs)
+    with col3:
+        st.metric("Conversations", total_convos)
+    st.markdown("#### Contacts")
+    df_contacts = fetch_contacts()
+    if not df_contacts.empty:
+        st.dataframe(df_contacts, width='stretch')
+    else:
+        st.info("No contacts found. Run the data generator or OCR pipeline to populate contacts.")
 
-# ──────────── Tab 5: Onyx 风格搜索 (由 search.py 提供) ────────────
-with tab5:
-    st.subheader("🔍 Onyx-Style Search (全链路 — 默认最强大模式)")
-    st.caption(
-        "引擎: txtai hybrid (BM25 + 向量) — 默认启用: LLM 查询扩展 + RRF 融合 + 图一跳扩展 + 交叉编码器重排序 | LiteLLM: " + LITELLM_MODEL
-    )
 
-    with st.expander("📋 示例查询与预期结果", expanded=False):
-        st.markdown("""
-| 查询 | 预期匹配标签 | 预期匹配内容关键词 | 说明 |
-|------|------------|-------------------|------|
-| `詐騙` / `scam` | `old_friend_reconnect`, `investment_opportunity` | 釣魚連結, 投資方案, 邀請碼 | 兩段詐騙對話 |
-| `投資方案 高回報` | `investment_opportunity` | 年化報酬率 8-12%, 債券, 藍籌股 | 羅思婷推銷投資 |
-| `物流報價 方案` | `product_inquiry` | 物流系統, ¥150 萬, 報價 | 陳志明詢價 |
-| `ERP timeout` | `tech_support` | timeout, 伺服器, 報表 | 張偉強報修 |
-| `發票金額不符` | `invoice_issue` | ¥320,000 vs ¥350,000, 合約 | 廖珮琪核對發票 |
-| `M365 E5 授權` | `software_license` | 50 個授權, ¥480,000 | 謝明宏詢價 |
-| `不良率 3%` | `quality_issue` | QA, 抽檢, 零件 | 蕭國榮反應品質 |
-| `Surface 電池` | `warranty_claim` | 續航力, 保固, 換貨 | 微軟保固處理 |
-| `續約租金` | `contract_renewal` | 調漲 3%, 租賃合約 | 和碩續約 |
-| `增加訂單 800` | `order_change` | 500→800 片, 交期 | 華碩調整數量 |
-""")
+def render_messages():
+    st.subheader("Messages")
+    df_msgs = fetch_messages()
+    if not df_msgs.empty:
+        origin_map = {3: "Customer", 4: "System", 5: "Agent"}
+        if 'origin' in df_msgs.columns:
+            df_msgs['origin'] = df_msgs['origin'].map(origin_map)
+        st.dataframe(df_msgs, width='stretch')
+    else:
+        st.info("No messages found. Generate some conversations first.")
 
-    if "search_results" not in st.session_state:
-        st.session_state.search_results = None
-    if "search_query" not in st.session_state:
-        st.session_state.search_query = None
-    if "rag_answer" not in st.session_state:
-        st.session_state.rag_answer = None
 
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-    with col_f1:
-        lbl_filter = st.selectbox(
-            "Label",
-            options=["All"] + KNOWN_LABELS,
-            index=0,
-            key="search_label"
-        )
-    with col_f2:
-        date_from = st.text_input("Date from (YYYY-MM-DD)", placeholder="2024-01-01", key="search_date_from")
-    with col_f3:
-        date_to = st.text_input("Date to (YYYY-MM-DD)", placeholder="2024-12-31", key="search_date_to")
-    with col_f4:
-        use_rerank = st.checkbox("Rerank (cross-encoder)", value=True, key="search_rerank")
+def render_upload_data():
+    st.subheader("Upload Data")
+    uploaded = st.file_uploader("Upload CSV or JSON files", type=["csv", "json"], accept_multiple_files=True)
+    st.info("Uploaded files can be connected to your ingestion flow here.")
+    if uploaded:
+        st.success(f"{len(uploaded)} file(s) selected.")
 
-    col_adv1, col_adv2, col_adv3, col_adv4 = st.columns([1, 1, 1, 2])
-    with col_adv1:
-        use_expand = st.checkbox("LLM query expand", value=True, key="search_expand",
-                                 help="启用 LLM 查询扩展 + 多查询加权 RRF 融合")
-    with col_adv2:
-        graph_expand = st.number_input("Graph expand (hops)", min_value=0, max_value=3, value=1, step=1,
-                                       key="search_graph_expand",
-                                       help="图一跳邻居扩展数 (0=关闭)")
-    with col_adv3:
-        use_agentic = st.checkbox("Agentic", value=False, key="search_agentic",
-                                  help="自动决定 mode/expand/graph/rerank (覆盖手动设置)")
-    with col_adv4:
-        st.markdown("")  # spacer
 
-    col_q1, col_q2 = st.columns([4, 1])
-    with col_q1:
-        search_query = st.text_input("Search query", placeholder="e.g., 詐騙, 投資方案, 物流報價", key="search_input")
-    with col_q2:
-        top_k = st.slider("Results", 1, 20, 10, key="search_top_k")
+def render_search():
+    st.subheader("Find Conversations")
+    st.caption("Use a simple search box and optional filters to narrow down the right conversations.")
+    with st.expander("Filters and settings", expanded=False):
+        col_f1, col_f2, col_f3 = st.columns(3, gap="medium")
+        with col_f1:
+            lbl_filter = st.selectbox("Topic", options=["Any topic"] + KNOWN_LABELS, index=0, key="search_label")
+        with col_f2:
+            date_from = st.text_input("From date", placeholder="2024-01-01", key="search_date_from")
+        with col_f3:
+            date_to = st.text_input("To date", placeholder="2024-12-31", key="search_date_to")
+        col_adv1, col_adv2 = st.columns(2, gap="medium")
+        with col_adv1:
+            use_rerank = st.checkbox("Better matching", value=True, key="search_rerank")
+        with col_adv2:
+            top_k = st.slider("How many results", 1, 20, 10, key="search_top_k")
+        use_expand = st.checkbox("Use smarter search", value=True, key="search_expand")
+        graph_expand = st.number_input("Nearby context", min_value=0, max_value=3, value=1, step=1, key="search_graph_expand")
+        use_agentic = st.checkbox("Auto-tune search", value=False, key="search_agentic")
 
-    if st.button("🔍 Onyx Search", type="primary"):
+    search_query = st.text_input("What are you looking for?", placeholder="e.g. investment offer, invoice issue, delivery update", key="search_input")
+    if st.button("Find Conversations", type="primary", use_container_width=True):
         if not search_query:
             st.warning("Please enter a search query.")
         else:
             st.session_state.rag_answer = None
-            lbl = None if lbl_filter == "All" else lbl_filter
+            lbl = None if lbl_filter == "Any topic" else lbl_filter
             from_date = datetime.strptime(date_from, "%Y-%m-%d").isoformat() if date_from else None
             to_date = datetime.strptime(date_to, "%Y-%m-%d").isoformat() if date_to else None
-
-            features_desc = []
-            if use_agentic:
-                features_desc.append("Agentic")
-            if use_expand:
-                features_desc.append("LLM 扩展+RRF")
-            if graph_expand > 0:
-                features_desc.append(f"图{graph_expand}跳")
-            if use_rerank:
-                features_desc.append("重排序")
-            status_text = f"Searching with {' + '.join(features_desc) if features_desc else '基础混合搜索'}..."
-            with st.spinner(status_text):
+            with st.spinner("Finding the best matches..."):
                 try:
-                    results = search_messages_onyx(
+                    results = search_messages(
                         search_query, lbl, from_date, to_date, top_k,
                         use_rerank=use_rerank,
                         expand=use_expand,
@@ -592,21 +615,53 @@ with tab5:
         results = st.session_state.search_results
         if results:
             st.success(f"Found {len(results)} result(s)")
-
+            with st.expander("Search details", expanded=False):
+                st.markdown("**Details to review:** search terms, applied filters, timestamps, and settings.")
             name_map = get_contact_name_map()
             df = pd.DataFrame(results, columns=[
                 "Message ID", "Content", "Send Time", "Customer ID", "Agent ID", "Label", "Similarity"
             ])
             df["Customer"] = df["Customer ID"].apply(lambda x: name_map.get(x, x) if x else "")
             df["Agent"] = df["Agent ID"].apply(lambda x: name_map.get(x, x) if x else "—")
-            df["Send Time"] = df["Send Time"].apply(
-                lambda t: t.strftime("%Y-%m-%d %H:%M") if hasattr(t, "strftime") else str(t)
-            )
+            df["Send Time"] = df["Send Time"].apply(lambda t: t.strftime("%Y-%m-%d %H:%M") if hasattr(t, "strftime") else str(t))
             df["Similarity"] = df["Similarity"].apply(lambda x: f"{x:.4f}")
-            df["Content"] = df["Content"].apply(lambda x: (x or "")[:100] + "..." if x and len(x) > 100 else (x or ""))
+            st.dataframe(df[["Message ID", "Customer", "Agent", "Send Time", "Label", "Similarity", "Content"]], width='stretch')
+        else:
+            st.info("No matching conversations found. Try a different phrase or a wider date range.")
 
-            st.dataframe(
-                df[["Message ID", "Customer", "Agent", "Send Time", "Label", "Similarity", "Content"]],
+
+if "app_view" not in st.session_state:
+    st.session_state.app_view = "Chat"
+
+with st.sidebar:
+    st.markdown("### Navigation")
+    st.radio(
+        "Choose a section",
+        ["Chat", "View Data", "Messages", "Upload Data", "Search"],
+        index=0,
+        key="app_view",
+        label_visibility="collapsed",
+    )
+    st.markdown("---")
+    st.markdown("<div class='nav-card'><strong>Chat</strong><br/><small>Primary workspace for conversation review and replies.</small></div>", unsafe_allow_html=True)
+    st.markdown("<div class='nav-card'><strong>View Data</strong><br/><small>Contacts, summary metrics, and label distribution.</small></div>", unsafe_allow_html=True)
+    st.markdown("<div class='nav-card'><strong>Messages</strong><br/><small>Recent message records in a table view.</small></div>", unsafe_allow_html=True)
+    st.markdown("<div class='nav-card'><strong>Upload Data</strong><br/><small>Import conversation files for processing.</small></div>", unsafe_allow_html=True)
+    st.markdown("<div class='nav-card'><strong>Search</strong><br/><small>Find the right conversations with simple filters.</small></div>", unsafe_allow_html=True)
+
+if st.session_state.app_view == "Chat":
+    render_chat_view()
+elif st.session_state.app_view == "View Data":
+    render_view_data()
+elif st.session_state.app_view == "Messages":
+    render_messages()
+elif st.session_state.app_view == "Upload Data":
+    render_upload_data()
+elif st.session_state.app_view == "Search":
+    render_search()
+
+st.markdown("---")
+st.caption("CorpChat Intelligence – powered by Unlimited‑OCR & RAG Pipeline")
                 width='stretch',
                 column_config={
                     "Similarity": st.column_config.TextColumn("Similarity", width="small"),
@@ -625,20 +680,20 @@ with tab5:
             if st.session_state.rag_answer:
                 st.markdown(f"**Answer:** {st.session_state.rag_answer}")
         else:
-            st.info("No matching messages found. Make sure the index is built: `python apps/corpchat/search.py build --force`")
+            st.info("找不到符合的訊息。請確認索引已建立：`python apps/corpchat/search.py build --force`")
 
-# ──────────── Tab 6: Onyx Chat ────────────
-with tab6:
-    st.subheader("🤖 Enterprise Chat RAG")
-
-    # To find the agent ID:
-    #   1. Log into Onyx at http://localhost:3000
-    #   2. Navigate to Agents → Edit Agent for "Enterprise Chat RAG"
-    #   3. The agent ID is the numeric portion in the URL (e.g., /agents/3 → agentId=3)
-    AGENT_ID = 1  # <-- REPLACE with the actual agent ID from the Onyx Agents page
-
-    onyx_chat_url = f"http://localhost:3000/app?agentId={AGENT_ID}"
-    st.iframe(src=onyx_chat_url, height=700)
+# ──────────── Tab 6: Chat RAG (hidden) ────────────
+# with tab6:
+#     st.subheader("🤖 Enterprise Chat RAG")
+#
+#     # To find the agent ID:
+#     #   1. Log into the local chat platform at http://localhost:3000
+#     #   2. Navigate to Agents → Edit Agent for "Enterprise Chat RAG"
+#     #   3. The agent ID is the numeric portion in the URL (e.g., /agents/3 → agentId=3)
+#     AGENT_ID = 1  # <-- REPLACE with the actual agent ID from the agent page
+#
+#     chat_url = f"http://localhost:3000/app?agentId={AGENT_ID}"
+#     st.iframe(src=chat_url, height=700)
 
 st.markdown("---")
 st.caption("CorpChat Intelligence – powered by Unlimited‑OCR & RAG Pipeline")
