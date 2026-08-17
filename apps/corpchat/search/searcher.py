@@ -29,6 +29,19 @@ from .temporal import TimeExpressionParser, TimeWindow
 from .utils import _segment
 
 
+def _label_match(doc_label, label_filter) -> bool:
+    """标签匹配: label_filter 可以是单个标签 (str) 或候选标签集合 (tuple/list)。
+
+    单个标签保持精确相等 (历史行为); 集合用于一个别名映射多个候选值的情况
+    (如 fraud → ("詐騙", "fraud")), 命中任意一个即通过。
+    """
+    if not label_filter:
+        return True
+    if isinstance(label_filter, (tuple, list, set, frozenset)):
+        return doc_label in label_filter
+    return doc_label == label_filter
+
+
 def _locked_emb_search(embeddings, *args, **kwargs):
     """Thread-safe txtai search (共用 tools._TXTAI_LOCK; Streamlit 多线程防护)."""
     with _TXTAI_LOCK:
@@ -257,7 +270,7 @@ class Searcher:
                         meta = json.loads(tags_json) if isinstance(tags_json, str) else dict(tags_json)
                     except (json.JSONDecodeError, TypeError):
                         meta = {}
-                if label_filter and meta.get("label") != label_filter:
+                if not _label_match(meta.get("label"), label_filter):
                     continue
                 send_time = meta.get("send_time")
                 if not send_time:
@@ -407,7 +420,7 @@ class Searcher:
 
         def _passes_filters(doc: Dict) -> bool:
             meta = doc.get("metadata", {})
-            if label_filter and meta.get("label") != label_filter:
+            if not _label_match(meta.get("label"), label_filter):
                 return False
             send_time = meta.get("send_time", "")
             # 比较日期部分 [:10], 避免带时间后缀的当日文档被窗口边界误排除
@@ -565,6 +578,8 @@ class Searcher:
         expand: bool = True,
         graph_expand: int = 0,
         label_filter: Optional[str] = None,
+        type_filter: Optional[str] = None,
+        status_filter: Optional[str] = None,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
         use_rerank: bool = True,
@@ -613,7 +628,7 @@ class Searcher:
 
         def _filter(item: Dict) -> bool:
             meta = item.get("metadata", {})
-            if label_filter and meta.get("label") != label_filter:
+            if not _label_match(meta.get("label"), label_filter):
                 return False
             send_time = meta.get("send_time", "")
             # 比较日期部分 [:10], 避免带时间后缀的当日文档被窗口边界误排除
