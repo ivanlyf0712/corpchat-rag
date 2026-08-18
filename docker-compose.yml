@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ocr
-      POSTGRES_PASSWORD: ***REMOVED***
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
       POSTGRES_DB: invoices
     ports:
       - "5432:5432"
@@ -69,7 +69,7 @@ services:
       DB_PORT: "5432"
       DB_NAME: invoices
       DB_USER: ocr
-      DB_PASSWORD: ***REMOVED***
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
       # 嵌入模型: 自动检测离线 —— config.py 检测到 hf-cache 卷已含 bge-m3 +
       # bge-reranker 时自动设 HF_HUB_OFFLINE=1 (启动离线提速); 未缓存时保持在线
       # 自动拉取 (换模型/清卷无需手动改配置)。如需强制覆盖可显式设 HF_HUB_OFFLINE=0/1。

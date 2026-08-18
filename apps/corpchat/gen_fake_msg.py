@@ -32,8 +32,11 @@ import psycopg2
 
 # ── Config ──
 DB_CONFIG = {
-    "host": "localhost", "port": 5432,
-    "user": "ocr", "password": "***REMOVED***", "dbname": "invoices"
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", "5432")),
+    "user": os.getenv("DB_USER", "ocr"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "dbname": os.getenv("DB_NAME", "invoices"),
 }
 
 fake = Faker(["zh_CN", "zh_TW", "en_US"])
