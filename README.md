@@ -31,7 +31,7 @@ export DB_HOST=localhost
 export DB_PORT=5432
 export DB_NAME=invoices
 export DB_USER=ocr
-export DB_PASSWORD=***REMOVED***
+export DB_PASSWORD=changeme
 export DEEPSEEK_API_KEY=sk-...   # required — docker-compose fails fast without it
 ```
 
