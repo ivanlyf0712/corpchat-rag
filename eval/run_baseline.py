@@ -124,13 +124,13 @@ def answer_question(query: str, searcher: Searcher, llm_client: LiteLLMClient,
                     contacts: Optional[List[Dict]] = None) -> Dict:
     """Run the current retrieval + LLM-synthesis path; return answer + raw hits.
 
-    agent-smartness-p0 wiring:
-      - derive_search_filter (ticket 01): label_filter + date window passed to
+    Answer-path wiring:
+      - derive_search_filter: label_filter + date window passed to
         the retrieval seam → windowed, label-scoped hits.
-      - evidence_passes (ticket 02): deterministic gate; on failure the honest
+      - evidence_passes: deterministic gate; on failure the honest
         NOT_FOUND_ANSWER is returned with EMPTY evidence (no synthesizer call,
         no cost). Confidence derives from the gate + hit placement.
-      - first_party_detail (ticket 03): message-hit → contact company/email
+      - first_party_detail: message-hit → contact company/email
         resolved deterministically and appended to the synthesis context.
       - Structured output {answer, citations, confidence, evidence_gate}.
     """
@@ -150,7 +150,7 @@ def answer_question(query: str, searcher: Searcher, llm_client: LiteLLMClient,
     confidence = compute_confidence(evidence_ok, query, raw_results)
     citations = [str(h.get("id") or "") for h in raw_results[:3]]
 
-    # ── 跨表一步直达 (ticket 03): 确定性 message-hit → contact 公司/邮箱 ──
+    # ── 跨表一步直达: 确定性 message-hit → contact 公司/邮箱 ──
     # party-detail 问题且 resolver 从命中中解析出发送者的联系人时, 直接给出
     # 确定性答案 (不调 synthesizer, 无 LLM 推理)。联系人记录作为证据追加到
     # raw_hits 首位, 保证 judge 的 grounded 判定可追溯到检索证据。
@@ -195,7 +195,7 @@ def answer_question(query: str, searcher: Searcher, llm_client: LiteLLMClient,
 
     context_parts = [_context_text(h) for h in context_hits]
 
-    # ── 跨表解析 (ticket 03): message hit → contact company/email 追加进上下文 ──
+    # ── 跨表解析: message hit → contact company/email 追加进上下文 ──
     if contacts:
         party = first_party_detail(query, raw_results, contacts)
         if party:
@@ -326,7 +326,7 @@ def main() -> None:
     llm_client = LiteLLMClient()
     reset_usage()
 
-    # 已知 label 集合 (ticket 01 的 label 提取) + 联系人表 (ticket 03 的跨表解析)
+    # 已知 label 集合 (label 提取) + 联系人表 (跨表解析)
     known_labels = sorted({m.get("metadata", {}).get("label") for m in messages if m.get("metadata", {}).get("label")})
 
     def _mock_judge(q, e, a, h, c):

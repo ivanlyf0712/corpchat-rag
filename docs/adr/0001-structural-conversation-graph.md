@@ -2,7 +2,7 @@
 
 We replaced txtai's auto-inferred, vector-similarity graph with a structural conversation graph built from real conversation relationships: sender, receiver, chatroom (`open_kfid`), company, and label. Graph expansion traverses these structural edges to surface genuine connections rather than a similarity echo.
 
-The graph is deterministic: every chunk node gets at least one structural edge at index time via txtai's `relationships` field, and since txtai graph inference defaults to `approximate: true`, nodes that already have edges are skipped by vector inference — the graph is purely structural. The previous `graph_mode=llm` path (`_extract_relations_with_llm`) was removed: it called a non-existent API (`add_edge`), was non-deterministic, and was the text-guessing anti-pattern this ticket removes.
+The graph is deterministic: every chunk node gets at least one structural edge at index time via txtai's `relationships` field, and since txtai graph inference defaults to `approximate: true`, nodes that already have edges are skipped by vector inference — the graph is purely structural. The previous `graph_mode=llm` path (`_extract_relations_with_llm`) was removed: it called a non-existent API (`add_edge`), was non-deterministic, and guessed relationships from text — the anti-pattern this change removes.
 
 Five structural edge types are recorded — `same_conversation`, `sender_receiver`, `same_sender`, `same_company`, `same_label` — but only the first four are traversal-eligible. `same_label` is recorded but never traversed, so a label never acts as a match signal.
 

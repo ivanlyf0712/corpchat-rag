@@ -2,7 +2,7 @@
 """OCR + invoice persistence — legacy code kept out of the CorpChat core.
 
 This module exists so `core/db.py` and `core/config.py` stay focused on the
-CorpChat POC. It is not imported by the app or the search package; it is kept
+CorpChat. It is not imported by the app or the search package; it is kept
 for any external tooling that still talks to the `invoices` table.
 
 Config + functions originally lived in core/config.py / core/db.py /

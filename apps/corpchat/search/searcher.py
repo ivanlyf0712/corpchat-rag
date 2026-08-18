@@ -247,7 +247,7 @@ class Searcher:
         纯时序: 扫描 sections.tags 按 send_time 窗口过滤, 时间倒序返回。
 
         不进 RRF —— 纯时序与内容检索是不同宇宙的结果, 融合无意义。
-        POC 语料规模小, 直接扫描 SQLite; 数据量增大后可在建索引期
+        当前直接扫描 SQLite (该规模下开销可忽略); 数据量增大后可在建索引期
         导出 doc_id → send_time 边表。
         """
         try:

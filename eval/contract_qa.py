@@ -1,4 +1,4 @@
-"""CorpChat eval — contract-domain QA set (oa-rag readiness artifact, ticket 05).
+"""CorpChat eval — contract-domain QA set.
 
 Rule-generated from the corpus's contract-like conversations (labels:
 contract_renewal / payment_reminder / invoice_issue / quotation_request /

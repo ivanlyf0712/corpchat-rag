@@ -41,7 +41,7 @@ def _evidence_snippets(raw_hits: List[Dict], limit: int = 15) -> str:
     (the answer path feeds up to `retrieve_k=15` dated hits to the synthesizer
     for windowed queries). Each line includes the sender AND the send date, so
     claims citing a message's date/period are checkable — otherwise the judge
-    would flag grounded statements as hallucinated (ticket 05 calibration).
+    would flag grounded statements as hallucinated (calibration note).
     """
     lines = []
     for h in (raw_hits or [])[:limit]:

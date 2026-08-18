@@ -2,7 +2,7 @@
 """CorpChat configuration.
 
 OCR / invoice / Ollama legacy config moved to `core/invoice_db.py` (see the
-folder reorg) so this module only carries what the CorpChat POC needs.
+folder reorg) so this module only carries what CorpChat needs.
 """
 import os
 

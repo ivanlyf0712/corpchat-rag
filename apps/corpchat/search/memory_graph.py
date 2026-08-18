@@ -8,8 +8,8 @@ Nodes: person / company / label / keyword / message.
 Edges: mention (entity↔message), association (person↔company, person↔label,
 person↔person same conversation), reference (message↔label).
 
-POC entity extraction is rule-based (structured metadata + jieba keywords);
-LLM entity extraction is a future enhancement.
+Entity extraction is currently rule-based (structured metadata + jieba keywords),
+chosen for determinism and zero-latency; LLM-based extraction can be layered on later.
 """
 
 from collections import Counter

@@ -15,3 +15,16 @@ apps/corpchat/search_index/
 apps/corpchat/contacts_index/
 models/
 .pytest_cache/
+
+# Internal working docs & AI-assistant session files (kept local)
+.scratch/
+CLAUDE.md
+AGENTS.md
+HANDOFF.md
+STATUS_REPORT.md
+_test*.py
+
+# Internal design/working docs (kept local)
+docs/agents/
+docs/hindsight-integration-plan.md
+docs/oa-rag-agentic-search-integration-plan.md

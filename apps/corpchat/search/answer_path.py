@@ -1,15 +1,15 @@
 """
 CorpChat Search — Deterministic Answer-Path Helpers
 ======================================================
-Pure, LLM-free building blocks for the answer path (agent-smartness-p0):
+Pure, LLM-free building blocks for the answer path:
 
-  - derive_search_filter / extract_label_filter — ticket 01: derive
+  - derive_search_filter / extract_label_filter — derive
     {label_filter, date_from, date_to} from a question so the retrieval seam
     returns windowed, label-scoped hits.
-  - extract_keywords / evidence_passes — ticket 02: deterministic evidence gate
+  - extract_keywords / evidence_passes — deterministic evidence gate
     that blocks the synthesizer when the question's key entities/keywords are
     not present in the retrieved hits (hallucination control).
-  - resolve_party_detail / first_party_detail / party_detail_text — ticket 03:
+  - resolve_party_detail / first_party_detail / party_detail_text —
     deterministic message-hit → contact company/email resolver (cross-table).
   - compute_confidence — deterministic confidence (low/medium/high) derived
     from the gate outcome + hit placement, never an LLM claim.
@@ -29,7 +29,7 @@ from typing import Dict, List, Optional
 
 from .temporal import TimeExpressionParser
 
-# 诚实 "无证据" 回复 (ticket 02 / user story 2) — 门控失败时直接返回, 不调 synthesizer。
+# 诚实 "无证据" 回复 — 门控失败时直接返回, 不调 synthesizer。
 NOT_FOUND_ANSWER = "没有找到相关证据"
 
 # ── 常见中文姓氏 (用于从问题中提取发送者人名) ─────────────────────
@@ -74,7 +74,7 @@ _TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}|[A-Za-z][A-Za-z0-9._-]{2,}")
 _NAME_RE = re.compile(r"([{surnames}][\u4e00-\u9fff]{{1,3}})".format(surnames=_SURNAMES))
 
 
-# ── Ticket 01: label filter + search filter derivation ─────────────
+# ── Label filter + search filter derivation ─────────────
 def extract_label_filter(question: str,
                          known_labels: Optional[List[str]] = None) -> Optional[str]:
     """从问题中提取已知 label (元数据过滤词), 无则返回 None。
@@ -167,7 +167,7 @@ def _keyword_in_hit(kw: str, h: Dict) -> bool:
     return False
 
 
-# ── Ticket 02: evidence gate ──────────────────────────────────────
+# ── Evidence gate ──────────────────────────────────────
 def evidence_passes(question: str, hits: List[Dict]) -> bool:
     """确定性证据门控: 问题中的关键实体/关键词是否出现在 top-k hit 里。
 
@@ -226,7 +226,7 @@ def compute_confidence(evidence_ok: bool, question: str, hits: List[Dict]) -> st
     return "medium"
 
 
-# ── Ticket 03: cross-table party-detail resolver ──────────────────
+# ── Cross-table party-detail resolver ──────────────────
 def _contact_matches(c: Dict, key: str) -> bool:
     key = str(key).strip()
     if not key:
@@ -308,7 +308,7 @@ def is_party_detail_question(question: str) -> bool:
     """检测"发送者 → 联系人公司/邮箱"类问题 (multi_hop 的一步直达)。
 
     命中这些问法且问题中有人名时, answer path 用确定性 resolver 直接回答,
-    不再走 LLM 合成 (ticket 03: "answer in one step without extra LLM reasoning")。
+    不再走 LLM 合成 ("answer in one step without extra LLM reasoning")。
     """
     if not question:
         return False
@@ -337,7 +337,7 @@ def party_answer_text(contact: Dict) -> str:
     return out
 
 
-# ── Ticket 04: rule detector (adaptive escalation) ────────────────
+# ── Rule detector (adaptive escalation) ────────────────
 _AGENT_MULTI_HOP_KWS = (
     "的公司是", "的公司", "邮箱", "郵箱", "email", "电话", "電話", "phone",
     "职位", "職位", "联系方式", "聯繫方式", "userid", "who is", "who are",

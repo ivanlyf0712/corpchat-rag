@@ -839,7 +839,7 @@ class CrossTableAgent:
             except Exception:
                 pass
 
-        # ── 收集结构化 hits (ticket 04: fallback 答案路径消费结构化结果) ──
+        # ── 收集结构化 hits (fallback 答案路径消费结构化结果) ──
         msg_hits = (msg_struct.get("hits") or []) if "msg_struct" in dir() else []
         contact_struct = {}
         try:
@@ -983,7 +983,7 @@ class CrossTableAgent:
                        contact_hits: Optional[List[Dict]] = None) -> str:
         """Use LiteLLM to summarize combined results.
 
-        msg_hits/contact_hits: 结构化工具 hits (ticket 04)。LLM 不可用或判断
+        msg_hits/contact_hits: 结构化工具 hits。LLM 不可用或判断
         无信息时, fallback 渲染优先消费结构化 hits (无 regex 解析格式化字符串)。
         """
         from .litellm_client import LiteLLMClient
@@ -1045,7 +1045,7 @@ class CrossTableAgent:
 
     def _structured_fallback_answer(self, query: str, msg_result: str, contact_result: str,
                                     msg_hits: List[Dict], contact_hits: List[Dict]) -> str:
-        """Fallback 渲染: 有结构化 hits 时直接渲染结构化结果 (ticket 04, 无 regex),
+        """Fallback 渲染: 有结构化 hits 时直接渲染结构化结果 (无 regex),
         否则回退到 legacy 格式化字符串解析 (保持测试向后兼容)。"""
         if msg_hits or contact_hits:
             return self._format_structured_answer(query, msg_hits or [], contact_hits or [],
@@ -1056,8 +1056,8 @@ class CrossTableAgent:
 
     def _format_fallback_answer(self, query: str, msg_result: str, contact_result: str) -> str:
         """Legacy formatted-string parsing (kept for backward-compat unit tests;
-        the production fallback path calls `_format_structured_answer` with the
-        tools' structured hits — ticket 04 removes regex-scraping from that path).
+        the live fallback path calls `_format_structured_answer` with the
+        tools' structured hits, avoiding regex scraping entirely.
         """
         lang = self._detect_language(query)
 

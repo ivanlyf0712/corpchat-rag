@@ -156,7 +156,7 @@ def snapshot_meta(tool_name: str) -> Optional[Dict[str, Any]]:
 def get_structured_result(tool_name: str) -> Optional[Dict[str, Any]]:
     """返回最近一次工具调用的结构化结果 `{hits, expanded_queries, filter_used}`。
 
-    agent-smartness-p0 ticket 04: 答案路径直接消费结构化 hits (每个 hit 为
+    答案路径直接消费结构化 hits (每个 hit 为
     {id, text, score, metadata}), 不再从格式化字符串 regex 解析。格式化
     显示字符串只是渲染层 (LLM 工具调用仍返回字符串, 但结构化通道并行可用)。
 
